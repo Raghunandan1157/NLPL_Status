@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Operational/runtime data (regenerable, large, contains client PII)
+eod_data/
+
+# Python caches
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Misc
+~$*.xlsx
+*.log
+.DS_Store
+Thumbs.db

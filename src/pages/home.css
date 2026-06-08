@@ -1,0 +1,219 @@
+.home {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* Hero */
+.hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  padding: 38px 40px;
+  background: linear-gradient(135deg, #2a2440 0%, #3a2f63 45%, #4733a0 100%);
+  color: #fff;
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 28px;
+  align-items: center;
+  box-shadow: var(--shadow);
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  width: 420px;
+  height: 420px;
+  right: -80px;
+  top: -160px;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.55) 0%, transparent 65%);
+  pointer-events: none;
+}
+.hero-content {
+  position: relative;
+  z-index: 1;
+}
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #e7e2ff;
+}
+.hero h1 {
+  color: #fff;
+  font-size: 30px;
+  line-height: 1.15;
+  margin: 16px 0 12px;
+  max-width: 18ch;
+}
+.hero p {
+  color: #cfc9ec;
+  font-size: 14.5px;
+  max-width: 52ch;
+  margin: 0 0 22px;
+}
+.hero-status {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.status-chip {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: var(--radius);
+  padding: 13px 16px;
+  backdrop-filter: blur(6px);
+}
+.status-chip-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  flex: none;
+}
+.status-chip-icon.ok {
+  background: rgba(34, 197, 94, 0.26);
+  color: #c7f9d8;
+}
+.status-chip-icon.bad {
+  background: rgba(239, 68, 68, 0.26);
+  color: #ffd4d4;
+}
+.status-chip small {
+  display: block;
+  font-size: 11px;
+  color: #b9b3da;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.status-chip strong {
+  color: #fff;
+  font-size: 15px;
+}
+
+/* Section heading */
+.section-head h2 {
+  font-size: 20px;
+}
+.section-head p {
+  margin: 4px 0 0;
+  font-size: 13.5px;
+}
+
+/* Module grid */
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+}
+.module-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform 0.16s, box-shadow 0.16s, border-color 0.16s;
+  position: relative;
+}
+.module-card.live {
+  cursor: pointer;
+}
+.module-card.live:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--border-strong);
+}
+.module-card.soon {
+  opacity: 0.78;
+}
+.module-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.module-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+.accent-indigo .module-icon {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+.accent-emerald .module-icon {
+  background: linear-gradient(135deg, #10b981, #059669);
+}
+.accent-amber .module-icon {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+.accent-violet .module-icon {
+  background: linear-gradient(135deg, #a855f7, #7c3aed);
+}
+.module-card h3 {
+  font-size: 16.5px;
+  margin-top: 4px;
+}
+.module-tagline {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary-600);
+}
+.accent-emerald .module-tagline { color: #059669; }
+.accent-amber .module-tagline { color: #d97706; }
+.accent-violet .module-tagline { color: #7c3aed; }
+.module-desc {
+  font-size: 13px;
+  color: var(--text-soft);
+  margin: 2px 0 4px;
+  line-height: 1.55;
+  flex: 1;
+}
+.module-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.module-tag {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-soft);
+}
+.module-open {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary-700);
+}
+
+@media (max-width: 860px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+  .hero h1 {
+    font-size: 24px;
+  }
+}

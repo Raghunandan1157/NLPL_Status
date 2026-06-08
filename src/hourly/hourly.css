@@ -1,0 +1,309 @@
+/* Hourly Module specific styles */
+
+.hourly-quick-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.hourly-quick-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-soft);
+  transition: all 0.15s;
+}
+
+.hourly-quick-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.gdrive-quick {
+  border-color: rgba(16, 185, 129, 0.2);
+  color: var(--success);
+}
+.gdrive-quick:hover {
+  background: rgba(16, 185, 129, 0.05);
+  border-color: var(--success);
+}
+
+.bundle-quick {
+  border-color: rgba(139, 92, 246, 0.2);
+  color: var(--primary);
+}
+.bundle-quick:hover {
+  background: rgba(139, 92, 246, 0.05);
+  border-color: var(--primary);
+}
+
+/* Time Picker Stepper */
+.demo-step-indicator {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.demo-step-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  transition: all 0.2s;
+}
+
+.demo-step-dot.active {
+  background: var(--primary);
+  transform: scale(1.2);
+}
+
+.demo-picker-step {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 10px 0;
+}
+
+.demo-picker-step.active {
+  display: flex;
+}
+
+.picker-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.picker-icon.success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.demo-date-input-wrap {
+  margin: 16px 0;
+  padding: 10px 24px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.number-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+  width: 100%;
+}
+
+.number-btn {
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.number-btn:hover {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary-700);
+}
+
+.number-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.ampm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-top: 16px;
+  width: 100%;
+}
+
+.demo-ampm-btn {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s;
+}
+
+.demo-ampm-btn:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.demo-ampm-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.demo-ampm-btn.active .ampm-desc {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ampm-label {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.ampm-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.selected-time-display {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 12px;
+}
+
+.date-preview-box {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 20px;
+  width: 100%;
+  font-size: 13px;
+}
+
+.date-preview-box span {
+  display: block;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.confirm-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+/* VBA Runner Panel styling */
+.vba-bundle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vba-bundle-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.vba-bundle-card:hover {
+  border-color: var(--border-strong);
+}
+
+.vba-bundle-card.selected {
+  border-color: var(--primary);
+}
+
+.vba-bundle-card-header {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+
+.vba-bundle-title {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.vba-bundle-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.vba-bundle-body {
+  border-top: 1px solid var(--border);
+  padding: 16px;
+  background: var(--surface);
+}
+
+.vba-run-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+/* Countdown element */
+.countdown-box {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 12.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* Dropdown target dates list in EOD Bundle */
+.bundle-item-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.bundle-item-row:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.bundle-item-row.selected {
+  border-color: var(--primary);
+  background: var(--grad-primary-soft);
+  color: var(--primary-700);
+}
+
+.bundle-item-files {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
