@@ -25,10 +25,17 @@ DESKTOP_DIR = PROJECT_DIR.parent
 # This project's isolated data directory (inputs, outputs, cache, archive).
 DATA_DIR = PROJECT_DIR / "eod_data"
 
-# The source project that owns the EOD engine. Overridable via env for portability.
-UNIFIED_COLLECTION_DIR = Path(
-    os.environ.get("UNIFIED_COLLECTION_DIR", str(DESKTOP_DIR / "unified-collection-report"))
-).resolve()
+# The EOD engine (config.py + services/) is VENDORED inside this project at
+# backend/engine, so nlpl_status runs standalone — no external project needed.
+VENDORED_ENGINE_DIR = (BACKEND_DIR / "engine").resolve()
+
+# Optional external engine override: set UNIFIED_COLLECTION_DIR to use a sibling
+# 'unified-collection-report' checkout instead of the vendored copy (dev only).
+_external_engine = os.environ.get("UNIFIED_COLLECTION_DIR")
+ENGINE_DIR = Path(_external_engine).resolve() if _external_engine else VENDORED_ENGINE_DIR
+
+# Kept for .env discovery + backward-compat references.
+UNIFIED_COLLECTION_DIR = ENGINE_DIR
 
 HOST = os.environ.get("NLPL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NLPL_PORT", "5055"))
@@ -72,17 +79,21 @@ def bootstrap() -> None:
     if _bootstrapped:
         return
 
-    if not UNIFIED_COLLECTION_DIR.exists():
+    if not ENGINE_DIR.exists() or not (ENGINE_DIR / "config.py").exists():
         raise RuntimeError(
-            f"Source engine project not found at: {UNIFIED_COLLECTION_DIR}\n"
-            "Place 'unified-collection-report' next to this project on the Desktop, "
-            "or set the UNIFIED_COLLECTION_DIR environment variable."
+            f"EOD engine not found at: {ENGINE_DIR}\n"
+            "The engine is normally vendored at backend/engine. If you set "
+            "UNIFIED_COLLECTION_DIR, make sure it points at a valid engine checkout."
         )
 
     _load_dotenv()
 
-    if str(UNIFIED_COLLECTION_DIR) not in sys.path:
-        sys.path.insert(0, str(UNIFIED_COLLECTION_DIR))
+    # Engine dir (config.py + services/) then backend dir (blueprints, settings,
+    # email/whatsapp services). backend ends up first so its own 'blueprints'
+    # package and helper modules take precedence; 'config'/'services' resolve to
+    # the engine.
+    if str(ENGINE_DIR) not in sys.path:
+        sys.path.insert(0, str(ENGINE_DIR))
     if str(BACKEND_DIR) not in sys.path:
         sys.path.insert(0, str(BACKEND_DIR))
 
