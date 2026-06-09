@@ -297,6 +297,22 @@ def get_hierarchy_from_parquet(date_str):
     area_col = find_column(df, 'Area', 'AreaName', 'Area Name', 'District', 'DistrictName', 'District Name')
     branch_col = find_column(df, 'BranchName', 'Branch Name', 'Branch', 'Branchname')
 
+    # Fallback: the instant par.parquet is DPD-minimal (AccountID + DPD Days) and
+    # carries no Region/Division/Area/Branch. Build the hierarchy from the demand
+    # master for that month instead (the same source the Employee module uses),
+    # otherwise the analytics drill-down filters come back empty.
+    if not region_col:
+        try:
+            dcache = config.BACKEND_MONTHLY_DIR / date_str[:7] / 'demand_cache.parquet'
+            if dcache.exists():
+                df = pd.read_parquet(dcache)
+                region_col = find_column(df, 'Region', 'RegionName', 'Region Name')
+                division_col = find_column(df, 'Division', 'DivisionName', 'Division Name')
+                area_col = find_column(df, 'Area', 'AreaName', 'Area Name', 'District', 'DistrictName', 'District Name')
+                branch_col = find_column(df, 'BranchName', 'Branch Name', 'Branch', 'Branchname')
+        except Exception:
+            pass
+
     regions = []
     region_to_divisions = {}
     division_to_areas = {}

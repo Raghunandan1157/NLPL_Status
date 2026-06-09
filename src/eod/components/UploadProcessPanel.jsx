@@ -8,6 +8,7 @@ import {
   Database,
   FileCheck2,
   FileOutput,
+  Loader2,
   Mail,
   MessageCircle,
   Merge,
@@ -16,11 +17,10 @@ import {
   UserCheck,
   Users,
 } from "lucide-react";
-import { Button, FileDrop, ProgressBar, Spinner, Switch, useToast } from "../../components/ui.jsx";
+import { Button, FileDrop, Switch, useToast } from "../../components/ui.jsx";
 import { todayDMY } from "../../lib/format.js";
 import {
   cacheFile,
-  eventsUrl,
   generateDailyHourlyReport,
   generateEmployeeReport,
   processEod,
@@ -28,32 +28,38 @@ import {
   syncToDashboard,
 } from "../api.js";
 import DbStatusSummary from "../../db/components/DbStatusSummary.jsx";
+import { useProcessingJob } from "../../shared/processing/useProcessingJob.js";
+import ProcessingPanel from "../../shared/processing/ProcessingPanel.jsx";
 
-const PIPELINE = [
-  { n: 1, label: "Register Files", icon: Database },
-  { n: 2, label: "SQL Join", icon: Merge },
-  { n: 3, label: "Process Data", icon: Sparkles },
-  { n: 4, label: "Write Excel", icon: FileOutput },
-  { n: 5, label: "Archive & Sync", icon: Archive },
-  { n: 6, label: "Employee Report", icon: UserCheck },
-  { n: 7, label: "Finish", icon: CheckCircle2 },
+// Step labels for the shared timeline (mirrors the backend's 7-step pipeline).
+const EOD_STEPS = [
+  { key: "register", label: "Register files" },
+  { key: "join", label: "SQL join" },
+  { key: "process", label: "Process data" },
+  { key: "excel", label: "Write Excel" },
+  { key: "archive", label: "Archive & sync" },
+  { key: "employee", label: "Employee report" },
+  { key: "finish", label: "Finish" },
 ];
+
+// Map the backend SSE step number (1-based) onto the shared step states.
+function eodSseStep(data, { setSteps }) {
+  if (data.done) return; // the hook marks everything done on completion
+  const n = typeof data.step === "number" ? data.step : 0;
+  if (n < 1) return;
+  const updates = {};
+  for (let i = 0; i < EOD_STEPS.length; i++) {
+    updates[i] = i < n - 1 ? "done" : i === n - 1 ? "active" : "pending";
+  }
+  setSteps(updates);
+}
 
 export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab }) {
   const toast = useToast();
+  const job = useProcessingJob({ module: "eod", steps: EOD_STEPS, onSseEvent: eodSseStep });
   const [files, setFiles] = useState({ par: null, collection: null });
   const [useCache, setUseCache] = useState(false);
-  const [logs, setLogs] = useState([
-    { text: "Ready. Upload PAR + Collection, then run EOD processing.", tone: "info" },
-  ]);
   const [busy, setBusy] = useState("");
-  const [step, setStep] = useState(0); // 0 = not started
-  const [done, setDone] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const [result, setResult] = useState(null);
-  const esRef = useRef(null);
-  const timerRef = useRef(null);
-  const logBoxRef = useRef(null);
 
   const isMasterDemandMissing = !status?.backend?.masterDemand;
   const isLastMonthParMissing = !status?.backend?.lastMonthPar;
@@ -63,64 +69,13 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
   const masterMissing = isMasterDemandMissing || isLastMonthParMissing;
 
   const canProcess = useMemo(() => {
-    if (busy) return false;
+    if (busy || job.busy) return false;
     if (masterMissing || needsSync) return false;
     if (useCache) return true;
     return Boolean(files.par && files.collection);
-  }, [files, useCache, busy, masterMissing, needsSync]);
+  }, [files, useCache, busy, job.busy, masterMissing, needsSync]);
 
-  useEffect(() => () => {
-    esRef.current?.close();
-    clearInterval(timerRef.current);
-  }, []);
-
-  useEffect(() => {
-    if (logBoxRef.current) logBoxRef.current.scrollTop = 0;
-  }, [logs]);
-
-  function pushLog(text, tone = "info") {
-    setLogs((items) => [{ text, tone }, ...items].slice(0, 120));
-  }
-
-  function toneFor(text) {
-    const t = text.toLowerCase();
-    if (t.includes("error") || t.includes("failed") || t.includes("traceback")) return "error";
-    if (t.includes("completed") || t.includes("success") || t.includes("saved") || t.includes("done")) return "success";
-    if (t.includes("warn")) return "warn";
-    return "info";
-  }
-
-  function connectLogs() {
-    esRef.current?.close();
-    const source = new EventSource(eventsUrl());
-    source.onmessage = (event) => {
-      if (!event.data) return;
-      try {
-        const data = JSON.parse(event.data);
-        if (data.log) {
-          pushLog(data.log, toneFor(data.log));
-          if (typeof data.step === "number" && data.step >= 1) setStep(data.step);
-          if (data.done) {
-            setStep(7);
-            setDone(true);
-          }
-        }
-      } catch {
-        pushLog(event.data);
-      }
-    };
-    source.onerror = () => {
-      /* keep-alive hiccups are normal; ignore */
-    };
-    esRef.current = source;
-  }
-
-  function startTimer() {
-    setElapsed(0);
-    const t0 = Date.now();
-    clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => setElapsed((Date.now() - t0) / 1000), 250);
-  }
+  const pushLog = (text, tone = "info") => job.log(text, tone);
 
   async function handleCache(type) {
     const file = files[type];
@@ -140,37 +95,36 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
 
   async function handleProcess() {
     if (!canProcess) return;
-    setBusy("process");
-    setResult(null);
-    setDone(false);
-    setStep(0);
-    setLogs([{ text: "Processing started…", tone: "info" }]);
-    connectLogs();
-    startTimer();
     try {
-      const requestOptions = {
-        targetDate: todayDMY(),
-        useBackendDemand: true,
-        useLastCache: useCache,
-        cachePar: true,
-        cacheCollection: true,
-        autoFixSheets: false,
-      };
-      const payload = await processEod({ files, options: requestOptions });
-      setResult(payload);
-      setDone(true);
-      setStep(7);
-      toast.success(payload.message || "Processing complete.", "EOD complete");
-      // Archive both reports under this date for the Reports & Downloads page.
-      snapshotReports(requestOptions.targetDate).catch(() => {});
-      refreshStatus();
+      const out = await job.run(async ({ processId, signal }) => {
+        const requestOptions = {
+          targetDate: todayDMY(),
+          useBackendDemand: true,
+          useLastCache: useCache,
+          cachePar: true,
+          cacheCollection: true,
+          autoFixSheets: false,
+          processId,
+          signal,
+        };
+        const payload = await processEod({ files, options: requestOptions });
+        if (payload?.cancelled) {
+          const err = new Error(payload.message || "Processing cancelled.");
+          err.cancelled = true;
+          throw err;
+        }
+        toast.success(payload.message || "Processing complete.", "EOD complete");
+        // Archive both reports under this date for the Reports & Downloads page.
+        snapshotReports(requestOptions.targetDate).catch(() => {});
+        refreshStatus();
+        return payload;
+      });
+      // Only a SUCCESSFUL run moves to Reports (cancelled returns null; failed throws).
+      if (!out) return;
+      // Focus the Reports & Downloads tab after a successful run.
+      if (onSwitchTab) setTimeout(() => onSwitchTab("reports"), 600);
     } catch (e) {
-      pushLog(e.message, "error");
-      toast.error(e.message, "Processing failed");
-    } finally {
-      clearInterval(timerRef.current);
-      setBusy("");
-      setTimeout(() => esRef.current?.close(), 1500);
+      if (!e?.cancelled) toast.error(e.message, "Processing failed");
     }
   }
 
@@ -228,8 +182,7 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
     onSwitchTab?.("whatsapp");
   }
 
-  const showProgress = busy === "process" || step > 0 || done;
-  const pct = done ? 100 : Math.min(95, Math.round((Math.max(0, step - 1) / 7) * 100) + (busy === "process" ? 6 : 0));
+  const showProgress = job.status !== "idle";
 
   return (
     <div className="eod-grid">
@@ -242,9 +195,9 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
               <h2>Upload & Process</h2>
               <p className="sub">PAR and Collection are required unless you reuse the last cache.</p>
             </div>
-            {busy === "process" && (
+            {job.running && (
               <span className="badge badge-info">
-                <Spinner size={13} /> Processing
+                <Loader2 size={13} className="spin" /> Processing
               </span>
             )}
           </div>
@@ -303,7 +256,7 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
               variant="success"
               icon={Play}
               disabled={!canProcess}
-              loading={busy === "process"}
+              loading={job.running}
               onClick={handleProcess}
               className="grow"
             >
@@ -395,48 +348,13 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
           </div>
         </div>
 
-        {/* Progress + live log */}
+        {/* Shared processing panel: status, step timeline, live log, stop. */}
         {showProgress && (
-          <div className="panel">
-            <div className="panel-header" style={{ marginBottom: 14 }}>
-              <div>
-                <p className="eyebrow">Step 2 · Pipeline</p>
-                <h2>{done ? "Completed" : busy === "process" ? "Processing…" : "Last run"}</h2>
-              </div>
-              <div className="row">
-                <span className="badge badge-muted">{elapsed ? `${elapsed.toFixed(1)}s` : "0.0s"}</span>
-                {done && (
-                  <span className="badge badge-success">
-                    <CheckCircle2 size={13} /> {pct}%
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <ProgressBar value={pct} done={done} />
-
-            <div className="pipeline">
-              {PIPELINE.map((p) => {
-                const state = done || step > p.n ? "done" : step === p.n ? "active" : "pending";
-                const Icon = state === "done" ? CheckCircle2 : p.icon;
-                return (
-                  <div key={p.n} className={`pipe ${state}`}>
-                    <span className="pipe-ic">{state === "active" ? <Spinner size={15} /> : <Icon size={15} />}</span>
-                    <span className="pipe-label">{p.label}</span>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="log-stream" ref={logBoxRef}>
-              {logs.map((l, i) => (
-                <p key={i} className={`log-line ${l.tone}`}>
-                  <span className="log-dot" />
-                  {l.text}
-                </p>
-              ))}
-            </div>
-          </div>
+          <ProcessingPanel
+            job={job}
+            eyebrow="Step 2 · Pipeline"
+            onRetry={canProcess ? handleProcess : undefined}
+          />
         )}
       </div>
 

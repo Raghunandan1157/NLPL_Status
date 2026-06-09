@@ -1,18 +1,16 @@
-import ReportHistory from "../../components/ReportHistory.jsx";
+import ReportsDownloadSection from "../../shared/processing/ReportsDownloadSection.jsx";
 import { reportArchiveFileUrl, reportArchiveList } from "../quickApi.js";
-
-const FALLBACK = [{ type: "output", label: "Quick Hourly Report", name: "" }];
 
 export default function ReportsPanel() {
   return (
-    <ReportHistory
-      eyebrow="Quick Report"
-      title="Reports & Downloads"
-      subtitle="Every generated Quick report, grouped by date. Previous runs stay downloadable for 3 days."
+    <ReportsDownloadSection
       listFn={reportArchiveList}
       fileUrlFn={reportArchiveFileUrl}
+      moduleLabel="Quick"
+      eyebrow="Quick Report"
+      title="Reports & Downloads"
+      subtitle="Pick a date to see the Quick reports generated that day. Previous runs stay downloadable for 3 days."
       emptyHint="Generate a Quick report to see it here."
-      fallbackReports={FALLBACK}
     />
   );
 }

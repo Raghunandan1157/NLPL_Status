@@ -42,9 +42,11 @@ _FILES = {
         "output": ("EOD_Output_Latest.xlsx", "Regular Demand vs Collection.xlsx", "Regular Demand vs Collection Report"),
         "report": ("EOD_Report_Latest.xlsx", "EOD Report.xlsx", "EOD Report"),
     },
+    # Only the generated Hourly Fast Report is surfaced in Reports & Downloads
+    # (named "Hourly Report"). The detailed Hourly Collection Report stays as a
+    # *_Latest file for the VBA/bundle flow but is NOT archived/listed here.
     "hourly": {
-        "output": ("Hourly_Collection_Report_Latest.xlsx", "Hourly Collection Report.xlsx", "Hourly Collection Report"),
-        "report": ("Hourly_Fast_Report_Latest.xlsx", "Hourly Fast Report.xlsx", "Hourly Fast Report"),
+        "output": ("Hourly_Fast_Report_Latest.xlsx", "Hourly Report.xlsx", "Hourly Report"),
     },
     "quick": {
         "output": ("Quick_Report_Latest.xlsx", "Quick Hourly Report.xlsx", "Quick Hourly Report"),
@@ -63,7 +65,7 @@ _FILES = {
 # natural key order of that module's _FILES entry.
 _ORDER_MAP = {
     "eod": ["output", "report"],
-    "hourly": ["output", "report"],
+    "hourly": ["output"],
     "quick": ["output"],
     "quick_month_end": ["output", "report", "employee"],
     "db": ["output"],

@@ -121,26 +121,18 @@ class DBManager:
                 self.con.execute("CREATE TABLE Last_Month_PAR AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
             else:
                 logging.info("Reading from Excel (first time or file changed)...")
+                # Use smart_read_excel so the account-level data sheet ('Sheet1')
+                # is read — NOT a pivot/summary sheet that may sit on sheet 0.
+                # Reading sheet 0 here previously cached a 130-row branch summary,
+                # which blanked the DPD buckets in the EOD Report.
+                from services.excel_reader import smart_read_excel
+                needed_cols = ['AccountID', 'DPD Days', 'LoanStatus']
                 try:
-                    df = pd.read_excel(file_path, sheet_name=0, usecols=['AccountID', 'DPD Days', 'LoanStatus'], engine='calamine')
-                except ValueError:
-                    try:
-                        df = pd.read_excel(file_path, sheet_name=0, engine='calamine')
-                    except Exception as e:
-                        logging.warning(f"calamine engine failed for last month PAR ingestion, falling back to openpyxl: {e}")
-                        df = pd.read_excel(file_path, sheet_name=0)
-                    needed_cols = ['AccountID', 'DPD Days', 'LoanStatus']
-                    available = [c for c in needed_cols if c in df.columns]
-                    df = df[available]
+                    df = smart_read_excel(file_path, usecols=needed_cols)
                 except Exception as e:
-                    logging.warning(f"calamine engine failed for last month PAR ingestion, falling back to openpyxl: {e}")
-                    try:
-                        df = pd.read_excel(file_path, sheet_name=0, usecols=['AccountID', 'DPD Days', 'LoanStatus'])
-                    except ValueError:
-                        df = pd.read_excel(file_path, sheet_name=0)
-                        needed_cols = ['AccountID', 'DPD Days', 'LoanStatus']
-                        available = [c for c in needed_cols if c in df.columns]
-                        df = df[available]
+                    logging.warning(f"Last Month PAR usecols read failed ({e}); reading full sheet")
+                    df = smart_read_excel(file_path)
+                    df = df[[c for c in needed_cols if c in df.columns]]
 
                 if 'AccountID' in df.columns:
                     df['AccountID'] = df['AccountID'].astype(str).str.strip()

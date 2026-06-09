@@ -1,22 +1,16 @@
-import ReportHistory from "../../components/ReportHistory.jsx";
+import ReportsDownloadSection from "../../shared/processing/ReportsDownloadSection.jsx";
 import { reportArchiveFileUrl, reportArchiveList } from "../qmeApi.js";
-
-const FALLBACK = [
-  { type: "output", label: "Regular Demand vs Collection", name: "" },
-  { type: "report", label: "EOD Report", name: "" },
-  { type: "employee", label: "Month-End Employee Report", name: "" },
-];
 
 export default function ReportsPanel() {
   return (
-    <ReportHistory
-      eyebrow="Month-End Report"
-      title="Reports & Downloads"
-      subtitle="Every month-end run, grouped by date. Previous runs stay downloadable for 3 days."
+    <ReportsDownloadSection
       listFn={reportArchiveList}
       fileUrlFn={reportArchiveFileUrl}
+      moduleLabel="Month-End"
+      eyebrow="Month-End Report"
+      title="Reports & Downloads"
+      subtitle="Pick a date to see the month-end reports generated that day. Previous runs stay downloadable for 3 days."
       emptyHint="Generate a month-end report to see it here."
-      fallbackReports={FALLBACK}
     />
   );
 }

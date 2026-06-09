@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analytics Dashboard — NLPL</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/common/base.css">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="/static/fonts/fonts.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="/static/common/utils.js"></script>
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- Header -->
+  <header class="page-header">
+    <a href="/" class="home-link" title="Home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </a>
+    <h1 class="page-title">Analytics Dashboard</h1>
+    <div class="header-controls">
+      <select id="date-select" class="date-select">
+        <option value="">Loading dates…</option>
+      </select>
+      <input type="text" id="search-input" class="search-input" placeholder="Search entities…">
+    </div>
+  </header>
+
+  <!-- KPI Strip -->
+  <div id="kpi-strip" class="kpi-grid"></div>
+
+  <!-- Rankings -->
+  <div class="section" id="rankings-section">
+    <div class="section-title">Rankings</div>
+    <div class="level-tabs" id="rankings-tabs">
+      <button class="level-tab active" data-level="State">State</button>
+      <button class="level-tab" data-level="Region">Region</button>
+      <button class="level-tab" data-level="Division">Division</button>
+      <button class="level-tab" data-level="Area">Area</button>
+      <button class="level-tab" data-level="Branch">Branch</button>
+    </div>
+    <div id="rankings-content" class="rankings-grid"></div>
+  </div>
+
+  <!-- Bar Chart + DPD Donut -->
+  <div class="section">
+    <div class="section-title">Collection % by Entity</div>
+    <div class="level-tabs" id="chart-tabs">
+      <button class="level-tab active" data-level="State">State</button>
+      <button class="level-tab" data-level="Region">Region</button>
+      <button class="level-tab" data-level="Division">Division</button>
+      <button class="level-tab" data-level="Area">Area</button>
+      <button class="level-tab" data-level="Branch">Branch</button>
+    </div>
+    <div class="chart-row">
+      <div class="chart-container">
+        <canvas id="bar-chart"></canvas>
+      </div>
+      <div class="chart-container">
+        <canvas id="dpd-chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trend Line — Small Multiples -->
+  <div class="section" id="trends-section-b">
+    <div class="section-title">Region-wise Collection % Trend — Small Multiples</div>
+    <div class="small-multiples-grid" id="small-multiples-grid"></div>
+  </div>
+
+  <!-- Trend Line — All Regions -->
+  <div class="section" id="trends-section-d">
+    <div class="section-title">Region-wise Collection % Trend — All Regions</div>
+    <div class="chart-container" style="min-height:300px;">
+      <canvas id="trend-chart-d"></canvas>
+    </div>
+  </div>
+
+  <!-- Run Rate Projection -->
+  <div class="section" id="projection-section">
+    <div class="section-title">Run Rate Projection</div>
+    <div id="projection-content" class="projection-card"></div>
+  </div>
+
+  <!-- Fresh Slippage -->
+  <div class="section" id="slippage-section">
+    <div class="section-title">Fresh Slippage Tracker</div>
+    <div id="slippage-content" class="slippage-card"></div>
+  </div>
+
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -405,7 +405,8 @@ def _is_month_end_date(target_date, force_regular_rules=False):
     return target_date.day == calendar.monthrange(target_date.year, target_date.month)[1]
 
 
-def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
+def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, ondate_next_date=None,
+                                pnpa_always_active=False):
     """Pre-compute all aggregations needed for district/branch sheet generation.
 
     Returns a dict of {'_precomp': DataFrame} with one row per
@@ -448,9 +449,19 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
 
     target_date_mask = meeting_dt_clean == target_date_clean
 
-    # Next business day: target_date + 1 day
-    next_day_clean = target_date_clean + pd.Timedelta(days=1)
+    # Next business day. Default = target_date + 1 (unchanged for EOD/daily).
+    # For the HOURLY report, ondate_next_date pins the On-Date to the generation
+    # date (today) instead of max(Meeting Date) which is month-end — otherwise the
+    # On-Date sheet shows month-end+1 (a future date with no data).
+    if ondate_next_date is not None:
+        next_day_clean = pd.Timestamp(ondate_next_date).normalize()
+    else:
+        next_day_clean = target_date_clean + pd.Timedelta(days=1)
     next_day_mask = meeting_dt_clean == next_day_clean
+
+    # Day after next (next_day + 1) — feeds the OverAll On-Date sheet's right block.
+    next_day2_clean = next_day_clean + pd.Timedelta(days=1)
+    next_day2_mask = meeting_dt_clean == next_day2_clean
 
     # DPD Group classification
     dpd = df['DPD Group'].fillna('').astype(str)
@@ -583,7 +594,11 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
     # PNPA (61-90)
     # Month-end (vba_template_month_end.js): no "Loan Status - Last Month" filter
     # Regular dates (vba_template.js): filter "Loan Status - Last Month" = "Active Loan"
-    if _is_month_end:
+    # The HOURLY report is intraday (not a month-end report), but its target_date
+    # is max(Meeting Date) = month-end, which would wrongly drop the active filter
+    # and make PNPA inconsistent with the 1-30/31-60 buckets (which always keep it).
+    # pnpa_always_active forces the active filter so PNPA matches the other buckets.
+    if _is_month_end and not pnpa_always_active:
         mask_pnpa_base = is_61_90
     else:
         mask_pnpa_base = is_61_90 & is_last_active
@@ -640,6 +655,10 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
     # Next day collection (same + Partial Amount = "Full EMI Paid"). Mirrors
     # od_collection but for next_day_mask — feeds the On-Date sheet COLLECTION.
     w['od_collection_next'] = np.where(next_day_mask & od_base & (partial_amt == 'Full EMI Paid'), 1, 0)
+    # Day-after-next (target_date + 2) demand/collection — TOMORROW column of the
+    # OverAll On-Date sheet. Additive; nothing else reads these.
+    w['od_demand_next2'] = np.where(next_day2_mask & od_base, 1, 0)
+    w['od_collection_next2'] = np.where(next_day2_mask & od_base & (partial_amt == 'Full EMI Paid'), 1, 0)
 
     # ---- AMOUNT-based metrics ----
     # Regular Amount (FTOD)
@@ -693,6 +712,12 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
     w['col_3160_fy'] = np.where(cur_mask_3160 & is_inst_full, 1, 0)
     w['pnpa_demand_fy'] = np.where(cur_mask_pnpa, 1, 0)
     w['pnpa_collection_fy'] = np.where(cur_mask_pnpa & is_inst_full, 1, 0)
+    # HOURLY collection on the current-month basis — without these the hourly FY
+    # sheet shows 0 bucket collection (the last-month hourly_* columns are empty
+    # for newly-disbursed FY loans). Mirrors hourly_col_130 = mask & Full Collected.
+    w['hourly_col_130_fy'] = np.where(cur_mask_130 & is_remark2_full & has_collection, 1, 0)
+    w['hourly_col_3160_fy'] = np.where(cur_mask_3160 & is_remark2_full & has_collection, 1, 0)
+    w['hourly_pnpa_collection_fy'] = np.where(cur_mask_pnpa & is_remark2_full & has_collection, 1, 0)
     w['npa_cases_fy'] = np.where(cur_mask_npa, 1, 0)
     w['npa_act_acc_fy'] = np.where(cur_mask_npa & dpd_not_blank & has_collection, 1, 0)
     w['npa_act_amt_fy'] = np.where(cur_mask_npa & dpd_not_blank & has_collection, collection, 0)
@@ -717,6 +742,7 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
         'hourly_col_130', 'hourly_col_3160', 'hourly_pnpa_collection',
         'npa_hourly_acc', 'npa_hourly_amt',
         'od_demand', 'od_collection', 'od_demand_next', 'od_collection_next',
+        'od_demand_next2', 'od_collection_next2',
         'reg_demand_total',
     ]
     # Amount-based metrics (cols 23+ in VBA, after officer_name at col 22)
@@ -736,6 +762,8 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False):
         'dem_130': 'dem_130_fy', 'col_130': 'col_130_fy',
         'dem_3160': 'dem_3160_fy', 'col_3160': 'col_3160_fy',
         'pnpa_demand': 'pnpa_demand_fy', 'pnpa_collection': 'pnpa_collection_fy',
+        'hourly_col_130': 'hourly_col_130_fy', 'hourly_col_3160': 'hourly_col_3160_fy',
+        'hourly_pnpa_collection': 'hourly_pnpa_collection_fy',
         'npa_cases': 'npa_cases_fy',
         'npa_act_acc': 'npa_act_acc_fy', 'npa_act_amt': 'npa_act_amt_fy',
         'npa_clo_acc': 'npa_clo_acc_fy', 'npa_clo_amt': 'npa_clo_amt_fy',
@@ -2155,14 +2183,20 @@ def process_files_pandas(demand_file, collection_file, par_file, output_file, au
     last_month_files = list(backend_data_dir.glob("Last_Month*.xlsx"))
     if last_month_files:
         try:
-            try:
-                df_last = pd.read_excel(last_month_files[0], sheet_name=0, usecols=['AccountID', 'DPD Days', 'LoanStatus'], engine='calamine')
-            except Exception:
-                df_last = pd.read_excel(last_month_files[0], sheet_name=0, usecols=['AccountID', 'DPD Days', 'LoanStatus'])
+            # IMPORTANT: the account-level PAR data (AccountID/DPD Days/LoanStatus)
+            # may not be on the first sheet — some Last Month files carry a pivot
+            # summary on sheet 0 (branch names), with the real data on 'Sheet1'.
+            # sheet_name=0 therefore reads the wrong sheet and the last-month
+            # columns silently drop, blanking every DPD bucket in the EOD Report.
+            # smart_read_excel prefers 'Sheet1' and auto-detects the header row.
+            df_last = smart_read_excel(last_month_files[0], usecols=['AccountID', 'DPD Days', 'LoanStatus'])
             dpd_lookup = dict(zip(df_last['AccountID'], df_last['DPD Days']))
             status_lookup = dict(zip(df_last['AccountID'], df_last['LoanStatus']))
             df_main['DPD Group - Last Month'] = df_main['Account ID'].map(dpd_lookup)
             df_main['Loan Status - Last Month'] = df_main['Account ID'].map(status_lookup)
+            _matched_lm = int(df_main['DPD Group - Last Month'].notna().sum())
+            logging.info(f"Last Month PAR loaded ({len(df_last)} rows); "
+                         f"DPD-Last-Month matched {_matched_lm} of {len(df_main)} accounts")
         except (ValueError, KeyError, FileNotFoundError) as e:
             logging.warning(f"Could not load Last Month PAR: {e}")
 

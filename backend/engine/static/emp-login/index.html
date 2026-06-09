@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Employee Login — NLPL</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="/static/fonts/fonts.css">
+<script src="/static/common/utils.js"></script>
+</head>
+<body>
+
+<!-- ═══ LOGIN SCREEN ═══ -->
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+    <img src="/static/logo.png" alt="NLPL" class="login-logo">
+    <h2 class="login-title">Employee Login</h2>
+    <p class="login-subtitle">Enter your Emp ID to view your performance</p>
+
+    <form id="login-form" class="login-form">
+      <div class="input-group" id="input-wrap">
+        <input type="text" id="emp-id-input" class="login-input" placeholder="Search or enter Emp ID" autocomplete="off" spellcheck="false">
+        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <div id="emp-dropdown" class="emp-dropdown"></div>
+      </div>
+
+      <div id="login-error" class="login-error"></div>
+
+      <button type="submit" class="login-btn">Login</button>
+
+      <div class="login-divider">or</div>
+
+      <button type="button" id="ceo-btn" class="ceo-btn">
+        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 12h14l3-12-5 4-5-6-5 6z"/><path d="M5 16v4h14v-4"/></svg>
+        CEO Dashboard
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ═══ DASHBOARD SCREEN ═══ -->
+<div id="dashboard-screen" class="dashboard-screen">
+
+  <!-- Header -->
+  <div class="dash-header">
+    <button id="dash-back-btn" class="dash-back" title="Logout">
+      <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <div class="dash-title-group">
+      <div class="dash-title">My Performance</div>
+      <div class="dash-subtitle" id="dash-subtitle"></div>
+    </div>
+    <div class="dash-controls">
+      <div class="month-nav" id="month-nav">
+        <button class="month-nav-btn" id="month-prev" title="Previous month">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <span class="month-nav-label" id="month-label">—</span>
+        <button class="month-nav-btn" id="month-next" title="Next month">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+      <select id="dash-date-select" class="dash-select">
+        <option value="">Loading...</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Loading State -->
+  <div id="dash-loading" class="empty-state" style="display:none;">
+    <span class="loading-spinner"></span> Loading your performance data...
+  </div>
+
+  <!-- Dashboard Content -->
+  <div id="dash-content" style="display:none;">
+
+    <!-- Employee Info Card -->
+    <div class="emp-info-card">
+      <div class="emp-avatar" id="emp-avatar"></div>
+      <div class="emp-meta">
+        <div class="emp-name" id="emp-name-display"></div>
+        <div class="emp-detail" id="emp-id-detail"></div>
+        <div class="emp-location" id="emp-location"></div>
+      </div>
+    </div>
+
+    <!-- KPI Strip -->
+    <div class="kpi-strip" id="kpi-strip"></div>
+
+    <!-- FY Toggle -->
+    <div class="toggle-section">
+      <button class="toggle-btn active" data-fy="overall">Overall</button>
+      <button class="toggle-btn" data-fy="fy">FY Disbursement</button>
+    </div>
+
+    <!-- VBA Sections -->
+    <div class="sections-container" id="sections-container"></div>
+
+    <!-- Accounts Table -->
+    <div class="accounts-section">
+      <div class="accounts-section-title">Account Detail</div>
+      <div class="accounts-table-wrap">
+        <table class="accounts-table">
+          <thead>
+            <tr>
+              <th>Account ID</th>
+              <th>Product</th>
+              <th>Demand</th>
+              <th>Collection</th>
+              <th>Installment Amt</th>
+              <th>DPD Group</th>
+              <th>Loan Status</th>
+            </tr>
+          </thead>
+          <tbody id="accounts-tbody">
+            <tr><td colspan="7" class="empty-state">Login to view accounts</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -6,8 +6,12 @@ import { MODULES, getModule } from "./modules/registry.js";
 import HomePage from "./pages/HomePage.jsx";
 import ReportsPage from "./pages/ReportsPage.jsx";
 import DbModule from "./db/DbModule.jsx";
+import { ProcessingProvider, useProcessing } from "./shared/processing/ProcessingContext.jsx";
+import StopProcessConfirmModal from "./shared/processing/StopProcessConfirmModal.jsx";
+import "./shared/processing/processing.css";
 
 function Shell() {
+  const processing = useProcessing();
   // view = "home" or a module id or "reports_page"
   const [view, setView] = useState(() => {
     const hash = window.location.hash.replace("#", "");
@@ -41,9 +45,16 @@ function Shell() {
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
-  const changeView = (newView) => {
+  const doChangeView = (newView) => {
     setView(newView);
     window.location.hash = newView === "home" ? "" : newView;
+  };
+
+  // Route navigation through the processing guard: if a job is active, this
+  // shows the Stop-confirm modal instead of leaving immediately.
+  const changeView = (newView) => {
+    if (newView === view) return;
+    processing.requestNavigation(() => doChangeView(newView));
   };
 
   const activeModule = (view === "home" || view === "reports_page" || view === "db") ? null : getModule(view);
@@ -149,6 +160,13 @@ function Shell() {
           </ErrorBoundary>
         </div>
       </div>
+
+      <StopProcessConfirmModal
+        open={Boolean(processing.pendingNav)}
+        stopping={processing.stopping}
+        onStay={processing.confirmStay}
+        onStop={processing.confirmStop}
+      />
     </div>
   );
 }
@@ -156,7 +174,9 @@ function Shell() {
 export default function App() {
   return (
     <ToastProvider>
-      <Shell />
+      <ProcessingProvider>
+        <Shell />
+      </ProcessingProvider>
     </ToastProvider>
   );
 }

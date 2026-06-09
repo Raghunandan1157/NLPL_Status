@@ -15,6 +15,7 @@ import pandas as pd
 from flask import Blueprint, jsonify, request, send_file, send_from_directory
 
 import config
+import process_jobs
 from services.column_matcher import find_column
 from services import file_manager
 from services.excel_reader import compute_file_hash, save_upload_to_temp
@@ -31,6 +32,20 @@ from services.gdrive import (
 logger = logging.getLogger(__name__)
 
 hourly_bp = Blueprint('hourly', __name__)
+
+
+def _norm_join_key(series):
+    """Normalise an AccountID column to a stable string key so the merge matches
+    regardless of dtype/format. The #1 cause of "collection shows 0" is a key
+    mismatch (EOD ID is int64 while the uploaded collection ID is read as text or
+    float). Coercing both sides to a trimmed string — dropping a trailing '.0'
+    that float parsing adds — makes 104010001484700, '104010001484700' and
+    104010001484700.0 all match. No values are altered, only the join key."""
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.replace(r'\.0$', '', regex=True)
+    )
 
 HOURLY_STATIC = str(config.STATIC_DIR / 'hourly')
 
@@ -507,12 +522,27 @@ def get_backend_files_status():
 @hourly_bp.route('/process', methods=['POST'])
 def process():
     if not try_acquire_processing():
-        return jsonify({
-            'error': 'Server is busy processing another request. Please try again in a moment.'
-        }), 503
+        # Reclaim the slot if the holder is stale (crashed/stuck), else give a
+        # precise reason so the user isn't told a generic "busy".
+        if process_jobs.reap_stale():
+            release_processing()
+        if not try_acquire_processing():
+            act = process_jobs.active()
+            if act and act['status'] == 'cancelling':
+                return jsonify({
+                    'error': 'Previous process is cancelling. Please wait a moment.',
+                    'status': 'cancelling',
+                }), 409
+            return jsonify({
+                'error': 'Server is busy processing another request. Please try again in a moment.',
+                'status': 'busy',
+            }), 503
+    # Register this run so the frontend can poll status / request cancellation.
+    job_id = process_jobs.start(request.form.get('processId'), 'hourly')
     try:
         import time as _time
         t_process_start = _time.time()
+        process_jobs.checkpoint(job_id)
         cleanup_eod_tmp = False
         eod_path = None
 
@@ -629,9 +659,28 @@ def process():
             }), 400
         logger.info(f"Detected CollectionTotal column: '{col_coll_total}'")
 
-        pivot_df = filtered_df.groupby(col_account_coll)[col_coll_total].sum().reset_index()
-        pivot_df.columns = ['AccountID', 'Sum of CollectionTotal']
-        logger.info(f"Pivot table created: {len(pivot_df)} unique AccountIDs")
+        process_jobs.checkpoint(job_id)
+
+        # Clean the collection AMOUNT to numeric WITHOUT forcing 0: strip
+        # commas/currency/spaces so amounts stored as text still aggregate. Cells
+        # that can't be parsed become NaN (excluded from the sum), never 0.
+        raw_amt = filtered_df[col_coll_total]
+        if pd.api.types.is_numeric_dtype(raw_amt):
+            amt_numeric = pd.to_numeric(raw_amt, errors='coerce')
+        else:
+            amt_numeric = pd.to_numeric(
+                raw_amt.astype(str).str.replace(r'[^0-9.\-]', '', regex=True).replace('', None),
+                errors='coerce',
+            )
+            bad = int(raw_amt.notna().sum() - amt_numeric.notna().sum())
+            if bad > 0:
+                logger.warning(f"CollectionTotal had {bad} non-numeric cell(s) coerced to NaN (excluded, not zeroed)")
+
+        # Aggregate by a NORMALISED join key (min_count=1 so an all-NaN group
+        # stays NaN/blank rather than collapsing to a misleading 0).
+        coll_keys = _norm_join_key(filtered_df[col_account_coll])
+        pivot_series = amt_numeric.groupby(coll_keys).sum(min_count=1)
+        logger.info(f"Pivot table created: {len(pivot_series)} unique AccountIDs")
 
         # 6. Read EOD Output file (try Parquet cache first)
         eod_hash = _get_file_hash(eod_path)
@@ -658,13 +707,33 @@ def process():
             }), 400
         logger.info(f"Detected AccountID column (EOD Output): '{col_account_eod}'")
 
-        # Create a lookup dictionary from pivot
-        lookup = dict(zip(pivot_df['AccountID'], pivot_df['Sum of CollectionTotal']))
+        # Map onto EOD Output using the SAME normalised key on both sides.
+        lookup = pivot_series.to_dict()
+        eod_keys = _norm_join_key(eod_df[col_account_eod])
+        eod_df[new_col_name] = eod_keys.map(lookup)
+        matched_rows = int(eod_df[new_col_name].notna().sum())
 
-        # Map values to EOD Output
-        eod_df[new_col_name] = eod_df[col_account_eod].map(lookup)
-        matched = eod_df[new_col_name].notna().sum()
-        logger.info(f"Added column '{new_col_name}' - matched {matched} out of {len(eod_df)} rows")
+        # ---- debug-safe summary (streams to Live Log; counts/totals only) ----
+        uploaded_rows = int(len(collection_df))
+        nonzero_uploaded = int((amt_numeric.fillna(0) != 0).sum())
+        uploaded_total = float(amt_numeric.sum(skipna=True) or 0)
+        matched_total = float(pd.to_numeric(eod_df[new_col_name], errors='coerce').sum(skipna=True) or 0)
+        unmatched_rows = int(len(eod_df) - matched_rows)
+        logger.info(
+            f"HOURLY SUMMARY | uploaded rows: {uploaded_rows} | amount col: '{col_coll_total}' "
+            f"| non-zero uploaded rows: {nonzero_uploaded} | uploaded total: {uploaded_total:,.2f}"
+        )
+        logger.info(
+            f"HOURLY SUMMARY | matched rows: {matched_rows} | matched total: {matched_total:,.2f} "
+            f"| unmatched rows: {unmatched_rows} | output collection total: {matched_total:,.2f}"
+        )
+
+        # ---- validation: non-zero uploaded but all-zero output => mapping failed
+        if nonzero_uploaded > 0 and matched_total == 0:
+            return jsonify({
+                'error': 'Collection mapping failed: uploaded collection contains non-zero values but generated output is all zero.',
+                'suggestion': "Check that the Collection 'AccountID' matches the EOD Output 'Account ID' (same IDs, no stray text/whitespace) and that the amount column holds numbers.",
+            }), 422
 
         # 9. Add Remark and Remark2 columns
         col_installment = find_column(eod_df, 'Installment Amount')
@@ -704,6 +773,7 @@ def process():
 
         # 10. Save as "Hourly Collection Report.xlsx" (xlsxwriter for speed)
         temp_dir = tempfile.mkdtemp(dir=str(config.TEMP_DIR))
+        process_jobs.add_temp(job_id, temp_dir)
         output_filename = "Hourly Collection Report.xlsx"
         output_path = str(Path(temp_dir) / output_filename)
 
@@ -715,7 +785,10 @@ def process():
         logger.info(f"Writing {total_rows:,} rows x {total_cols} cols to Excel...")
 
         # ── Fast pre-computed report (same as EOD daily report) ──
-        # Must run BEFORE fillna('') which destroys numeric data
+        # Must run BEFORE fillna('') which destroys numeric data. The Fast Report
+        # is the file auto-downloaded to the user (see the send_file below).
+        fast_report_path = config.BACKEND_DATA_DIR / 'Hourly_Fast_Report_Latest.xlsx'
+        fast_report_ready = False
         try:
             from services.eod_processor import _compute_precomputed_sheets
             from services.daily_report_builder import build_daily_report
@@ -753,7 +826,21 @@ def process():
                 h_target_date = pd.Timestamp.now()
 
             has_officer = 'Emp ID' in df_for_precomp.columns
-            precomp = _compute_precomputed_sheets(df_for_precomp, h_target_date)
+            # Anchor the On-Date sheet on the GENERATION date (the date the user
+            # is generating for), not max(Meeting Date) which is month-end. This
+            # makes the On-Date show today's demand with data instead of a future
+            # month-end+1 date that has none. Only the On-Date columns shift;
+            # FTOD/monthly/buckets still use h_target_date so OverAll is unchanged.
+            try:
+                h_ondate = pd.to_datetime(selected_date, format='%d-%m-%Y')
+            except Exception:
+                h_ondate = pd.Timestamp.now().normalize()
+            # pnpa_always_active: the hourly report is intraday, so PNPA must keep
+            # the Active-Loan filter (consistent with 1-30/31-60) even though
+            # h_target_date lands on month-end and would otherwise drop it.
+            precomp = _compute_precomputed_sheets(df_for_precomp, h_target_date,
+                                                  ondate_next_date=h_ondate,
+                                                  pnpa_always_active=True)
 
             # Per-employee data for the 'Employee Data' sheet (all products combined).
             # df_for_precomp['Collection'] is the hourly value — numbers stay
@@ -777,10 +864,11 @@ def process():
                                f"({type(_emp_err).__name__}: {_emp_err})")
 
             if precomp and '_precomp' in precomp:
-                fast_report_path = config.BACKEND_DATA_DIR / 'Hourly_Fast_Report_Latest.xlsx'
                 h_fmt = f"{selected_date} @ {selected_time}"
                 build_daily_report(precomp['_precomp'], fast_report_path, h_target_date, has_officer,
-                                   formatted_dt=h_fmt, hourly_mode=True, employee_data=employee_data)
+                                   formatted_dt=h_fmt, hourly_mode=True, employee_data=employee_data,
+                                   ondate_next_date=h_ondate)
+                fast_report_ready = fast_report_path.exists()
                 logger.info(f"Fast hourly report generated: {fast_report_path.name}")
 
             # Save the precomp-ready data as parquet for /generate-fast-report
@@ -800,6 +888,7 @@ def process():
         # _write_excel_fast writes row-by-row which is safe.
         eod_df = eod_df.fillna('')
         from services.eod_processor import _write_excel_fast
+        process_jobs.checkpoint(job_id)
         _write_excel_fast(eod_df, output_path)
 
         t_write = _time.time() - t_write_start
@@ -813,10 +902,26 @@ def process():
         except Exception as cpy_err:
             logger.warning(f"Could not save latest output: {cpy_err}")
 
+        # Auto-download is ALWAYS the generated HOURLY FAST REPORT — never the
+        # detailed Hourly Collection Report, and never an uploaded input. If the
+        # Fast Report wasn't produced this run, fail clearly rather than sending
+        # the wrong file.
+        if not (fast_report_ready and Path(fast_report_path).exists()):
+            return jsonify({
+                'error': 'Hourly Fast Report could not be generated for this run, so there is nothing to download.',
+                'suggestion': 'Ensure the EOD Output has the required Region/Division/officer and demand columns, then retry.',
+            }), 500
+
+        # Filename rule: "Hourly Report - {selected_time}.xlsx" with ':' -> '-'
+        # and any invalid filename characters stripped.
+        safe_time = selected_time.replace(':', '-')
+        safe_time = ''.join(c for c in safe_time if c not in '\\/*?:"<>|').strip()
+        download_filename = f"Hourly Report - {safe_time}.xlsx"
+
         response = send_file(
-            output_path,
+            str(fast_report_path),
             as_attachment=True,
-            download_name=output_filename,
+            download_name=download_filename,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
         # Pass detected AccountID field name to frontend for VBA code injection
@@ -835,6 +940,14 @@ def process():
 
         return response
 
+    except process_jobs.JobCancelled:
+        logger.info("Hourly processing cancelled by user.")
+        process_jobs.cleanup(job_id)
+        return jsonify({
+            'cancelled': True,
+            'status': 'cancelled',
+            'message': 'Processing cancelled by user.',
+        }), 200
     except Exception as e:
         err = user_error(e, context='hourly-process')
         return jsonify({
@@ -842,6 +955,7 @@ def process():
             'suggestion': err['suggestion'],
         }), 500
     finally:
+        process_jobs.finish(job_id)
         if cleanup_eod_tmp and eod_path:
             Path(eod_path).unlink(missing_ok=True)
         gc_checkpoint("hourly-request-complete")
@@ -850,21 +964,21 @@ def process():
 
 @hourly_bp.route('/save-to-downloads', methods=['POST'])
 def save_to_downloads():
-    """Save the latest processed output to ~/Downloads."""
+    """Save the latest generated Hourly Fast Report to ~/Downloads."""
     try:
-        latest = config.BACKEND_DATA_DIR / 'Hourly_Collection_Report_Latest.xlsx'
+        latest = config.BACKEND_DATA_DIR / 'Hourly_Fast_Report_Latest.xlsx'
         if not latest.exists():
-            return jsonify({'success': False, 'message': 'No processed output found'}), 404
+            return jsonify({'success': False, 'message': 'No generated report found'}), 404
 
         dl_dir = Path.home() / 'Downloads'
         dl_dir.mkdir(parents=True, exist_ok=True)
-        dest = dl_dir / 'Hourly Collection Report.xlsx'
+        dest = dl_dir / 'Hourly Report.xlsx'
 
         # Dedup naming if file exists
         if dest.exists():
             i = 1
             while True:
-                dest = dl_dir / f'Hourly Collection Report ({i}).xlsx'
+                dest = dl_dir / f'Hourly Report ({i}).xlsx'
                 if not dest.exists():
                     break
                 i += 1

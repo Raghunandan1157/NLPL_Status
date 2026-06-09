@@ -33,20 +33,89 @@ export function cacheCollection(file) {
 export const cacheCollectionGdrive = () => requestJson("/hourly/cache-collection-gdrive", { method: "POST" });
 
 /* -------------------------------------------------------------- processing */
-export function processHourly({ files, options }) {
+/**
+ * Run the hourly merge. The /hourly/process endpoint generates the reports
+ * server-side (saving the Hourly Fast Report + detailed report as *_Latest) and
+ * returns the Fast Report as a binary attachment. There is NO auto-download:
+ * the user downloads from Reports & Downloads (or the "Save a copy" button). We
+ * only read the response headers (filename for display, AccountID field for the
+ * VBA bundle) and discard the body.
+ *
+ * @returns {Promise<{filename: string, accountIdField: string}>}
+ */
+export async function processHourly({ files, options }) {
   const fd = new FormData();
   fd.append("date", options.date);
   if (options.hour) fd.append("hour", options.hour);
   if (options.minute) fd.append("minute", options.minute);
   if (options.ampm) fd.append("ampm", options.ampm);
-  
+
   if (files.eodOutput) fd.append("eodOutput", files.eodOutput);
   if (files.collection) fd.append("file", files.collection);
   if (files.hourlyDaily) fd.append("hourlyDaily", files.hourlyDaily);
-  
+
   if (options.useGDriveCollection) fd.append("useGDriveCollection", "true");
-  
-  return requestJson("/hourly/process", { method: "POST", body: fd });
+  if (options.processId) fd.append("processId", options.processId);
+
+  let response;
+  try {
+    response = await fetch(apiUrl("/hourly/process"), {
+      method: "POST",
+      body: fd,
+      signal: options.signal,
+    });
+  } catch (e) {
+    if (e?.name === "AbortError") throw e;
+    throw new Error("Cannot reach the backend. Make sure it is running (npm run dev).");
+  }
+
+  // Errors come back as JSON, not a file.
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const msg = payload.error || payload.message || `Request failed (${response.status})`;
+    throw new Error(payload.suggestion ? `${msg} — ${payload.suggestion}` : msg);
+  }
+
+  // A cancelled run returns JSON (200) instead of a file — surface it as abort.
+  const ctype = response.headers.get("Content-Type") || "";
+  if (ctype.includes("application/json")) {
+    const payload = await response.json().catch(() => ({}));
+    if (payload.cancelled) {
+      const err = new Error(payload.message || "Processing cancelled.");
+      err.cancelled = true;
+      throw err;
+    }
+    throw new Error(payload.error || payload.message || "Unexpected response.");
+  }
+
+  const accountIdField = response.headers.get("X-Account-ID-Field") || "";
+
+  // Resolve a clean download filename from Content-Disposition, falling back to
+  // a date-stamped name so it is clear and never overflows the UI.
+  let filename = "";
+  const disp = response.headers.get("Content-Disposition") || "";
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(disp);
+  const plain = /filename="?([^";]+)"?/i.exec(disp);
+  if (star) filename = decodeURIComponent(star[1]);
+  else if (plain) filename = plain[1];
+  if (!filename) {
+    // Backend normally provides the name via Content-Disposition; this is only a
+    // safety fallback. Mirror the backend rule: "Hourly Report - {time}.xlsx".
+    const t = (options.hour && options.minute && options.ampm)
+      ? `${options.hour}-${String(options.minute).padStart(2, "0")} ${options.ampm}`
+      : "";
+    filename = t ? `Hourly Report - ${t}.xlsx` : "Hourly Report.xlsx";
+  }
+
+  // No auto-download: we only needed the headers. Discard the body so the
+  // (possibly several-MB) report isn't streamed/held for nothing.
+  try {
+    await response.body?.cancel();
+  } catch {
+    /* ignore */
+  }
+
+  return { filename, accountIdField };
 }
 
 export const saveToDownloads = () => requestJson("/hourly/save-to-downloads", { method: "POST" });

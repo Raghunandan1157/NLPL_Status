@@ -32,7 +32,7 @@ MAX_COL = 24
 
 def build_daily_report(precomp_df, output_path, target_date, has_officer=False,
                        formatted_dt=None, eod_target_date=None, hourly_mode=False,
-                       employee_data=None):
+                       employee_data=None, ondate_next_date=None):
     """Build the VBA-template-style report from precomp data.
 
     Args:
@@ -54,10 +54,14 @@ def build_daily_report(precomp_df, output_path, target_date, has_officer=False,
     report_date_only = report_date.split('@')[0].strip() if '@' in report_date else report_date
     eod_date = eod_target_date if eod_target_date else target_date
     eod_date_str = eod_date.strftime('%d-%m-%Y')
-    # The On-Date sheet shows demand for the day AFTER target_date — the precomp's
-    # next_day_mask is keyed off target_date + 1. The label must match that date
-    # in every mode (a PAR file dated the 19th → On-Date demand for the 20th).
-    next_day_str = (target_date + pd.Timedelta(days=1)).strftime('%d-%m-%Y')
+    # The On-Date sheet shows demand for the precomp's next_day_mask. By default
+    # that's target_date + 1 (EOD/daily). For the HOURLY report, ondate_next_date
+    # pins it to the generation date so the label matches the data (which is also
+    # keyed off ondate_next_date in _compute_precomputed_sheets).
+    if ondate_next_date is not None:
+        next_day_str = pd.Timestamp(ondate_next_date).strftime('%d-%m-%Y')
+    else:
+        next_day_str = (target_date + pd.Timedelta(days=1)).strftime('%d-%m-%Y')
 
     from services.eod_processor import get_fy_label
     fy_label = get_fy_label(target_date)

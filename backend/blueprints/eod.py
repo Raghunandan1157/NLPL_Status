@@ -27,6 +27,7 @@ from services import file_manager
 from services import eod_processor as processor
 from services.excel_reader import compute_file_hash, save_upload_to_temp, smart_read_excel
 from services.memory_manager import try_acquire_processing, release_processing, gc_checkpoint, get_rss_mb
+import process_jobs
 from services.hardware_profile import MEMORY_BUDGET_MB
 from services.error_handler import user_error
 from functools import wraps
@@ -776,11 +777,26 @@ def cache_file_endpoint():
 def process_files_endpoint():
     """Main processing endpoint - merges PAR + Demand + Collection."""
     if not try_acquire_processing():
-        return jsonify({
-            'error': 'Server is busy processing another request. Please try again in a moment.'
-        }), 503
+        # Reclaim the slot if the holder is stale (crashed/stuck), else give a
+        # precise reason so the user isn't told a generic "busy".
+        if process_jobs.reap_stale():
+            release_processing()
+        if not try_acquire_processing():
+            act = process_jobs.active()
+            if act and act['status'] == 'cancelling':
+                return jsonify({
+                    'error': 'Previous process is cancelling. Please wait a moment.',
+                    'status': 'cancelling',
+                }), 409
+            return jsonify({
+                'error': 'Server is busy processing another request. Please try again in a moment.',
+                'status': 'busy',
+            }), 503
+    # Register this run so the frontend can poll status / request cancellation.
+    job_id = process_jobs.start(request.form.get('processId'), 'eod')
     try:
         _proc_t0 = time.perf_counter()
+        process_jobs.checkpoint(job_id)
         use_last_cache = request.form.get('useLastCache') == 'true'
         use_backend_demand = request.form.get('useBackendDemand') == 'true' or use_last_cache
         auto_fix_sheets = request.form.get('autoFixSheets') == 'true'
@@ -922,6 +938,7 @@ def process_files_endpoint():
             # sheets_dir=None: skip inline sheet extraction (saves ~15-20s)
             # Individual sheets are extracted in a background thread below.
             _extraction_done.clear()
+            process_jobs.checkpoint(job_id)
             sheets_dir = str(BACKEND_DATA_DIR / 'sheets')
             df_result, report_path = processor.process_files(
                 demand_path, collection_path, par_path, output_path,
@@ -1071,6 +1088,15 @@ def process_files_endpoint():
 
             return jsonify(result)
 
+    except process_jobs.JobCancelled:
+        _extraction_done.set()  # Unblock any waiters on cancel
+        logger.info("EOD processing cancelled by user.")
+        process_jobs.cleanup(job_id)
+        return jsonify({
+            'cancelled': True,
+            'status': 'cancelled',
+            'message': 'Processing cancelled by user.',
+        }), 200
     except Exception as e:
         _extraction_done.set()  # Unblock any waiters on failure
         err = user_error(e, context='eod-process')
@@ -1079,6 +1105,7 @@ def process_files_endpoint():
             'suggestion': err['suggestion'],
         }), 500
     finally:
+        process_jobs.finish(job_id)
         gc_checkpoint("eod-request-complete")
         release_processing()
 

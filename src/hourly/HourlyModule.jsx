@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import { Code, MessageCircle, Workflow } from "lucide-react";
+import { Code, Download, MessageCircle, Workflow } from "lucide-react";
 import { getBackendFilesStatus } from "./hourlyApi.js";
 import { getDbStatus } from "../eod/api.js";
 import HourlyProcess from "./HourlyProcess.jsx";
 import VbaRunnerPanel from "./components/VbaRunnerPanel.jsx";
 import HourlyWhatsApp from "./HourlyWhatsApp.jsx";
+import ReportsPanel from "./components/ReportsPanel.jsx";
 import "./hourly.css";
 
 const TABS = [
   { id: "process", label: "Process", icon: Workflow },
+  { id: "reports", label: "Reports & Downloads", icon: Download },
   { id: "vba", label: "VBA Runner", icon: Code },
   { id: "whatsapp", label: "WhatsApp", icon: MessageCircle },
 ];
@@ -60,7 +62,10 @@ export default function HourlyModule({ health, onHealthChange }) {
       </div>
 
       {tab === "process" && (
-        <HourlyProcess status={status} refreshStatus={refreshStatus} />
+        <HourlyProcess status={status} refreshStatus={refreshStatus} goToReports={() => setTab("reports")} />
+      )}
+      {tab === "reports" && (
+        <ReportsPanel />
       )}
       {tab === "vba" && (
         <VbaRunnerPanel />

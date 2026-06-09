@@ -72,6 +72,10 @@ def detect_employee_columns(df):
     emp_name = find_column(
         df, 'Emp Name', 'EmpName', 'Employee Name',
         'emp_name', 'Emp_Name', 'EmployeeName',
+        # The demand master carries the employee/officer name as 'Officer Name'
+        # (there is no 'Emp Name' column), so include it — otherwise names render
+        # blank in the Employee Performance module.
+        'Officer Name', 'OfficerName', 'Officer_Name',
     )
     return {'emp_id': emp_id, 'emp_name': emp_name}
 
@@ -453,8 +457,12 @@ def _compute_merged_dataframe(date_str):
         select_clauses.append("lm.LoanStatus as \"Loan Status - Last Month\"")
         joins.append("LEFT JOIN Legacy_Data lm ON d.\"Account ID\" = lm.AccountID")
     else:
-        select_clauses.append("NULL as \"DPD Group - Last Month\"")
-        select_clauses.append("NULL as \"Loan Status - Last Month\"")
+        # CAST to VARCHAR so the all-NULL column is typed as text (not numeric).
+        # Otherwise downstream SQL like COALESCE("DPD Group - Last Month", '')
+        # fails with "Could not convert string '' to INT32" and the whole
+        # leaderboard query is swallowed to 0 rows.
+        select_clauses.append("CAST(NULL AS VARCHAR) as \"DPD Group - Last Month\"")
+        select_clauses.append("CAST(NULL AS VARCHAR) as \"Loan Status - Last Month\"")
 
     final_query = (
         "WITH " + ",\n".join(ctes) + "\nSELECT \n"

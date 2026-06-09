@@ -20,6 +20,10 @@ from blueprints.db import db_bp  # noqa: E402  (migrated: Disbursement Report)
 from blueprints.instant import instant_bp  # noqa: E402  (migrated: Instant Report)
 from blueprints.disbursement import disbursement_bp  # noqa: E402  (migrated: Disbursement EC2 sync)
 from blueprints.supabase_sync import supabase_bp  # noqa: E402  (migrated: Supabase sync)
+from blueprints.analytics import analytics_bp  # noqa: E402  (migrated: Analytics)
+from blueprints.employee import employee_bp  # noqa: E402  (migrated: Employee Performance)
+from blueprints.emp_login import emp_login_bp  # noqa: E402  (migrated: Employee login)
+from blueprints.emp_v3 import emp_v3_bp  # noqa: E402  (migrated: Employee v3)
 
 import retention  # noqa: E402  (local 3-day run-artifact retention)
 import email_service  # noqa: E402  (in-app Gmail login — centralized for all modules)
@@ -27,8 +31,9 @@ import whatsapp_service  # noqa: E402  (centralized WhatsApp session/contacts)
 import report_history  # noqa: E402  (generic per-run report archive engine)
 import reports_archive  # noqa: E402  (per-date report archive — EOD)
 import hourly_reports_archive  # noqa: E402  (hourly reports archive)
+import process_jobs  # noqa: E402  (in-process job registry for status + cancellation)
 
-from flask import Flask, jsonify, request, send_file  # noqa: E402
+from flask import Flask, jsonify, request, send_file, send_from_directory  # noqa: E402
 from flask_cors import CORS  # noqa: E402
 
 
@@ -99,7 +104,10 @@ MODULES = [
 
 
 def create_app() -> Flask:
-    app = Flask(__name__, static_folder=None)
+    # static_folder = engine static dir (matches unified-collection-report) so the
+    # migrated module UIs' shared assets (/static/common/*, /static/fonts/*,
+    # /static/logo.png, …) are served exactly as in the original project.
+    app = Flask(__name__, static_folder=str(engine_config.STATIC_DIR), static_url_path="/static")
     app.config["MAX_CONTENT_LENGTH"] = engine_config.MAX_CONTENT_LENGTH
     app.config["MAX_FORM_MEMORY_SIZE"] = engine_config.MAX_FORM_MEMORY_SIZE
     CORS(app, resources={r"/*": {"origins": "*"}})
@@ -114,6 +122,10 @@ def create_app() -> Flask:
     app.register_blueprint(instant_bp, url_prefix="/instant")
     app.register_blueprint(disbursement_bp, url_prefix="/disbursement")
     app.register_blueprint(supabase_bp, url_prefix="/supabase")
+    app.register_blueprint(analytics_bp, url_prefix="/analytics")  # migrated: Analytics
+    app.register_blueprint(employee_bp, url_prefix="/employee")  # migrated: Employee Performance
+    app.register_blueprint(emp_login_bp, url_prefix="/emp-login")  # migrated: Employee login
+    app.register_blueprint(emp_v3_bp, url_prefix="/emp-v3")  # migrated: Employee v3
 
     # Start the 3-day run-artifact retention daemon (sweeps now + on a timer).
     retention.start(engine_config.DATA_DIR)
@@ -221,6 +233,25 @@ def create_app() -> Flask:
             data.get("bundle_path", ""), data.get("filename", "")
         )
         return jsonify(result), (200 if result.get("success") else 500)
+
+    # --- generic process job status + cancellation -------------------------
+    # Cancellation is cooperative: cancel sets a flag the processing code checks
+    # at phase boundaries (see process_jobs.py). It cannot kill an in-flight
+    # pandas/Excel call mid-operation, but stops a multi-phase run promptly.
+    @app.post("/api/<module>/process/<job_id>/cancel")
+    def process_cancel(module, job_id):
+        # Only set the cancel flag here. Temp-file cleanup happens inside the
+        # running /process handler's JobCancelled path — deleting them now would
+        # race a still-writing process. The frontend then polls /status until the
+        # job reaches 'cancelled' (set in the handler's finally, after the lock
+        # is released), guaranteeing the server is free before a restart.
+        result = process_jobs.request_cancel(module, job_id)
+        code = 200 if result.get("found") else 404
+        return jsonify(result), code
+
+    @app.get("/api/<module>/process/<job_id>/status")
+    def process_status(module, job_id):
+        return jsonify(process_jobs.status_of(module, job_id))
 
     # --- generic per-run report history (shared engine for migrated modules) -
     # New modules use /api/reports/<module>/... mirroring the EOD/Hourly trio.

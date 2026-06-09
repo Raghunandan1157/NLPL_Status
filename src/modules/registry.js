@@ -9,6 +9,8 @@ import DisbursementModule from "../disbursement/DisbursementModule.jsx";
 import InstantModule from "../instant/InstantModule.jsx";
 import DisbEc2Module from "../disbursement_ec2/DisbEc2Module.jsx";
 import SupabaseModule from "../supabase/SupabaseModule.jsx";
+import AnalyticsModule from "../analytics/AnalyticsModule.jsx";
+import EmployeeModule from "../employee/EmployeeModule.jsx";
 
 /**
  * Central module registry. The home page and sidebar are generated from this
@@ -133,7 +135,9 @@ export const MODULES = [
     description: "Field-officer collection performance dashboards and exports.",
     icon: Users,
     accent: "emerald",
-    status: "soon",
+    status: "live",
+    Component: EmployeeModule,
+    features: ["Officer leaderboard", "Per-officer performance", "Account drill-down"],
   },
   {
     id: "disbursement_report",
@@ -154,7 +158,9 @@ export const MODULES = [
     description: "Trends, cohorts and portfolio analytics across modules.",
     icon: LineChart,
     accent: "violet",
-    status: "soon",
+    status: "live",
+    Component: AnalyticsModule,
+    features: ["Trends & DPD flow", "Rankings & heatmaps", "Projections"],
   },
 ];
 

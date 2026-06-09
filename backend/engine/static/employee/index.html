@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Employee Performance — NLPL</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/common/base.css">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="/static/fonts/fonts.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="/static/common/utils.js" defer></script>
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- Header -->
+  <header class="page-header">
+    <a href="/" class="home-link" title="Home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </a>
+    <h1 class="page-title">Employee Performance</h1>
+    <div class="header-controls">
+      <div class="month-nav" id="month-nav">
+        <button class="month-nav-btn" id="month-prev" title="Previous month">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <span class="month-nav-label" id="month-label">—</span>
+        <button class="month-nav-btn" id="month-next" title="Next month">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+      <select id="date-select" class="date-select">
+        <option value="">Loading…</option>
+      </select>
+      <!-- View toggle tabs -->
+      <div class="view-tabs" id="view-tabs">
+        <button class="view-tab active" data-view="leaderboard">Leaderboard</button>
+        <button class="view-tab" data-view="individual">Individual</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Status Banner (hidden by default, shown if Emp ID column not found) -->
+  <div id="status-banner" class="status-banner" style="display:none;">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+    <span id="status-message">Emp ID column not found in data. Run an Instant Report with Demand Sheet that includes Emp ID.</span>
+  </div>
+
+  <!-- ═══ LEADERBOARD VIEW ═══ -->
+  <div id="leaderboard-view" class="view-panel active">
+
+    <!-- Filter Bar -->
+    <div class="filter-bar">
+      <input type="text" id="lb-search" class="search-input" placeholder="Search by Emp ID or Name…">
+      <select id="lb-region" class="filter-select">
+        <option value="">All Regions</option>
+      </select>
+      <select id="lb-district" class="filter-select">
+        <option value="">All Areas</option>
+      </select>
+      <select id="lb-branch" class="filter-select">
+        <option value="">All Branches</option>
+      </select>
+      <select id="lb-sort" class="filter-select">
+        <option value="collection_pct">Sort: Collection %</option>
+        <option value="demand">Sort: Demand</option>
+        <option value="collection">Sort: Collection</option>
+        <option value="ftod">Sort: FTOD</option>
+        <option value="dpd_1_30">Sort: 1-30 DPD</option>
+        <option value="npa_count">Sort: NPA</option>
+      </select>
+      <button id="lb-order-toggle" class="order-toggle" title="Toggle sort order">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </button>
+    </div>
+
+    <!-- KPI Summary Strip -->
+    <div id="lb-kpis" class="kpi-grid">
+      <div class="kpi-row-top" id="lb-kpi-strip"></div>
+    </div>
+
+    <!-- Leaderboard Table -->
+    <div class="section">
+      <div class="data-table-wrap">
+        <table class="data-table" id="lb-table">
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Emp ID</th>
+              <th>Name</th>
+              <th>Region</th>
+              <th>Area</th>
+              <th>Branch</th>
+              <th data-key="demand">Demand</th>
+              <th data-key="collection">Collection</th>
+              <th data-key="ftod">FTOD</th>
+              <th data-key="collection_pct">Collection %</th>
+              <th data-key="dpd_1_30">1-30 DPD</th>
+              <th data-key="npa_count">NPA</th>
+            </tr>
+          </thead>
+          <tbody id="lb-tbody">
+            <tr><td colspan="12" class="empty-state">Select a date to load employee data</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="pagination-bar" id="lb-pagination">
+      <button class="page-btn" id="lb-prev" disabled>Previous</button>
+      <span class="page-info" id="lb-page-info">Page 1 of 1</span>
+      <button class="page-btn" id="lb-next" disabled>Next</button>
+    </div>
+
+  </div>
+
+  <!-- ═══ INDIVIDUAL VIEW ═══ -->
+  <div id="individual-view" class="view-panel">
+
+    <!-- Employee Search -->
+    <div class="emp-search-bar">
+      <div class="emp-search-wrap">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input type="text" id="emp-search" class="emp-search-input" placeholder="Search Employee ID or Name…" autocomplete="off">
+        <div class="emp-suggestions" id="emp-suggestions"></div>
+      </div>
+      <button class="back-btn" id="back-to-lb" title="Back to Leaderboard">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        Back
+      </button>
+    </div>
+
+    <!-- Employee Info Card -->
+    <div id="emp-info-card" class="emp-info-card" style="display:none;">
+      <div class="emp-info-main">
+        <div class="emp-avatar" id="emp-avatar">—</div>
+        <div class="emp-details">
+          <div class="emp-name" id="emp-name">—</div>
+          <div class="emp-id-display" id="emp-id-display">—</div>
+          <div class="emp-location" id="emp-location">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Employee KPI Cards -->
+    <div id="emp-kpis" class="kpi-grid" style="display:none;">
+      <div class="kpi-row-top" id="emp-kpi-strip"></div>
+    </div>
+
+    <!-- Overall / FY Toggle -->
+    <div id="emp-toggle-section" class="section" style="display:none;">
+      <div class="view-tabs" id="fy-tabs">
+        <button class="view-tab active" data-fy="overall">Overall</button>
+        <button class="view-tab" data-fy="fy">FY Disbursement</button>
+      </div>
+    </div>
+
+    <!-- VBA-Style Section Tables -->
+    <div id="emp-sections" style="display:none;"></div>
+
+    <!-- Product-wise Breakdown -->
+    <div id="emp-products" class="section" style="display:none;">
+      <div class="section-title">Product-wise Breakdown</div>
+      <div id="emp-product-tables"></div>
+    </div>
+
+    <!-- Account Detail Table -->
+    <div id="emp-accounts-section" class="section" style="display:none;">
+      <div class="section-title">Account Details</div>
+      <div class="data-table-wrap" style="max-height:400px; overflow-y:auto;">
+        <table class="data-table" id="emp-accounts-table">
+          <thead>
+            <tr>
+              <th>Account ID</th>
+              <th>Product</th>
+              <th>Demand</th>
+              <th>Collection</th>
+              <th>DPD Group</th>
+              <th>Loan Status</th>
+            </tr>
+          </thead>
+          <tbody id="emp-accounts-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Empty state when no employee selected -->
+    <div id="emp-empty" class="empty-state-container">
+      <div class="empty-state-icon">
+        <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </div>
+      <div class="empty-state-text">Search for an employee or click a row in the Leaderboard</div>
+    </div>
+
+  </div>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -9,6 +9,15 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+.pytest_cache/
+
+# Build output (regenerable: npm run build)
+dist/
+.vite/
+
+# Test artifacts (dev only)
+test/screenshots/
+coverage/
 
 # Secrets
 .env

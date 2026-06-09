@@ -1,29 +1,20 @@
-import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import {
   Archive,
   CalendarDays,
-  Clock,
-  Database,
+  CheckCircle2,
   Download,
   FileCheck2,
+  FileSpreadsheet,
   FolderOpen,
-  Merge,
+  Loader2,
   Play,
-  RefreshCw,
   Zap,
-  CheckCircle2,
 } from "lucide-react";
-import { Button, FileDrop, Switch, useToast, Modal, Spinner } from "../components/ui.jsx";
+import { Button, FileDrop, useToast, Modal } from "../components/ui.jsx";
 import {
-  getBackendFilesStatus,
-  checkEodDuplicate,
-  getEodMeetingDates,
-  deleteHourlyDaily,
-  saveHourlyDaily,
   saveBackendFile,
   cacheEodOutput,
-  cacheCollection,
-  cacheCollectionGdrive,
   processHourly,
   saveToDownloads,
   generateFastReport,
@@ -34,199 +25,91 @@ import {
   getBundles,
   useBundle,
   saveBundleToServer,
-  runVbaScript,
   snapshotReports,
 } from "./hourlyApi.js";
-import { eventsUrl } from "../eod/api.js";
+import { useProcessingJob } from "../shared/processing/useProcessingJob.js";
+import ProcessingPanel from "../shared/processing/ProcessingPanel.jsx";
 
-export default function HourlyProcess({ status, refreshStatus }) {
+// The six visible stages of an hourly run, in order.
+const STEPS = [
+  { key: "upload", label: "File uploaded" },
+  { key: "validate", label: "Validating columns" },
+  { key: "match", label: "Matching data" },
+  { key: "generate", label: "Generating report" },
+  { key: "save", label: "Saving to reports" },
+  { key: "download", label: "Download ready" },
+];
+
+const HOURS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+const MINUTES = ["00", "10", "20", "30", "40", "50"];
+
+export default function HourlyProcess({ status, refreshStatus, goToReports }) {
   const toast = useToast();
-  
-  // File inputs
-  const [files, setFiles] = useState({ eodOutput: null, collection: null, hourlyDaily: null });
+  const job = useProcessingJob({ module: "hourly", steps: STEPS });
+
+  // File inputs (Collection is the only file uploaded each run; EOD Output
+  // auto-flows from the latest EOD run or a prior upload).
+  const [files, setFiles] = useState({ eodOutput: null, collection: null });
   const [useGDriveCollection, setUseGDriveCollection] = useState(false);
-  
-  // Date and Time selection
+
+  // Date + time selection
   const [targetDate, setTargetDate] = useState(() => {
     const today = new Date();
     const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
     return `${yyyy}-${mm}-${dd}`;
   });
-  
+
   const [timeState, setTimeState] = useState(() => {
     const now = new Date();
     let hours = now.getHours();
     const ampm = hours >= 12 ? "PM" : "AM";
     hours = hours % 12;
-    hours = hours ? hours : 12; // 0 should be 12
+    hours = hours ? hours : 12;
     const mins = Math.floor(now.getMinutes() / 10) * 10;
-    return {
-      hour: String(hours),
-      minute: String(mins).padStart(2, '0'),
-      ampm,
-    };
+    return { hour: String(hours), minute: String(mins).padStart(2, "0"), ampm };
   });
-  
-  // Modals & UI states
+
+  // Modals
   const [gdriveModal, setGdriveModal] = useState(false);
   const [gdriveUrl, setGdriveUrl] = useState("");
   const [gdriveFiles, setGdriveFiles] = useState([]);
   const [selectedGdriveFile, setSelectedGdriveFile] = useState(null);
-  
+
   const [bundleModal, setBundleModal] = useState(false);
   const [bundles, setBundles] = useState([]);
   const [selectedBundle, setSelectedBundle] = useState(null);
-  
+
   const [busy, setBusy] = useState("");
-  const [countdown, setCountdown] = useState("");
-  const [showHourlyDaily, setShowHourlyDaily] = useState(false);
-  
-  // SSE log stream state
-  const [logs, setLogs] = useState([
-    { text: "Ready. Upload files, then run Hourly processing.", tone: "info" },
-  ]);
-  const [done, setDone] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const esRef = useRef(null);
-  const timerRef = useRef(null);
-  const logBoxRef = useRef(null);
-  
-  // Refs
-  const countdownInterval = useRef(null);
-  
-  // Date representation helpers
+  const [report, setReport] = useState(null); // { filename }
+
   const targetDateDMY = useMemo(() => {
     if (!targetDate) return "";
-    const parts = targetDate.split("-");
-    return `${parts[2]}-${parts[1]}-${parts[0]}`;
+    const [y, m, d] = targetDate.split("-");
+    return `${d}-${m}-${y}`;
   }, [targetDate]);
 
   const loadGDriveUrl = useCallback(async () => {
     try {
       const res = await getGDriveConfig();
-      if (res.success && res.folder_url) {
-        setGdriveUrl(res.folder_url);
-      }
+      if (res.success && res.folder_url) setGdriveUrl(res.folder_url);
     } catch {}
   }, []);
 
   const loadBundles = useCallback(async () => {
     try {
       const res = await getBundles();
-      if (res.success) {
-        setBundles(res.bundles || []);
-      }
+      if (res.success) setBundles(res.bundles || []);
     } catch {}
   }, []);
 
-  // Set default values from backend status on load
   useEffect(() => {
     loadGDriveUrl();
     loadBundles();
   }, [loadGDriveUrl, loadBundles]);
 
-  // SSE Logger Helpers
-  useEffect(() => () => {
-    esRef.current?.close();
-    clearInterval(timerRef.current);
-  }, []);
-
-  useEffect(() => {
-    if (logBoxRef.current) logBoxRef.current.scrollTop = 0;
-  }, [logs]);
-
-  const pushLog = useCallback((text, tone = "info") => {
-    setLogs((items) => [{ text, tone }, ...items].slice(0, 120));
-  }, []);
-
-  const toneFor = useCallback((text) => {
-    const t = text.toLowerCase();
-    if (t.includes("error") || t.includes("failed") || t.includes("traceback")) return "error";
-    if (t.includes("completed") || t.includes("success") || t.includes("saved") || t.includes("done")) return "success";
-    if (t.includes("warn")) return "warn";
-    return "info";
-  }, []);
-
-  const connectLogs = useCallback(() => {
-    esRef.current?.close();
-    const source = new EventSource(eventsUrl());
-    source.onmessage = (event) => {
-      if (!event.data) return;
-      try {
-        const data = JSON.parse(event.data);
-        if (data.log) {
-          pushLog(data.log, toneFor(data.log));
-          if (data.done) {
-            setDone(true);
-          }
-        }
-      } catch {
-        pushLog(event.data);
-      }
-    };
-    source.onerror = () => {
-      /* keep-alive hiccups are normal; ignore */
-    };
-    esRef.current = source;
-  }, [pushLog, toneFor]);
-
-  const startTimer = useCallback(() => {
-    setElapsed(0);
-    const t0 = Date.now();
-    clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => setElapsed((Date.now() - t0) / 1000), 250);
-  }, []);
-
-  // Countdown timer for HourlyDaily file
-  const startCountdown = useCallback((timestampStr) => {
-    if (countdownInterval.current) clearInterval(countdownInterval.current);
-    
-    function update() {
-      const now = new Date();
-      const midnight = new Date(now);
-      midnight.setHours(24, 0, 0, 0);
-      const diff = midnight - now;
-      
-      if (diff <= 0) {
-        clearInterval(countdownInterval.current);
-        setCountdown("Expired");
-        (async () => {
-          try {
-            await deleteHourlyDaily();
-            toast.warn("Hourly Daily file expired at midnight, removed.");
-            refreshStatus();
-          } catch {}
-        })();
-        return;
-      }
-      
-      const hrs = Math.floor(diff / 3600000);
-      const mins = Math.floor((diff % 3600000) / 60000);
-      const secs = Math.floor((diff % 60000) / 1000);
-      const pad = (n) => String(n).padStart(2, "0");
-      setCountdown(`${pad(hrs)}:${pad(mins)}:${pad(secs)}`);
-    }
-    
-    update();
-    countdownInterval.current = setInterval(update, 1000);
-  }, [refreshStatus, toast]);
-
-  useEffect(() => {
-    if (status?.backend?.hourlyDailyFile && !status?.backend?.hourlyDailyExpired) {
-      startCountdown(status.backend.hourlyDailyTimestamp);
-    } else {
-      setCountdown("");
-      if (countdownInterval.current) clearInterval(countdownInterval.current);
-    }
-    
-    return () => {
-      if (countdownInterval.current) clearInterval(countdownInterval.current);
-    };
-  }, [status, startCountdown]);
-
-  // Handle Manual Uploads
+  // EOD Output manual upload
   async function handleEodOutputUpload(file) {
     if (!file) return;
     setBusy("upload-eod");
@@ -234,12 +117,9 @@ export default function HourlyProcess({ status, refreshStatus }) {
       const res = await saveBackendFile("eodOutput", file);
       toast.success(res.message || "EOD Output uploaded.", "Uploaded");
       setFiles((f) => ({ ...f, eodOutput: null }));
-      
-      // Auto cache immediately
       try {
         await cacheEodOutput();
       } catch {}
-      
       refreshStatus();
     } catch (e) {
       toast.error(e.message, "Upload failed");
@@ -250,30 +130,12 @@ export default function HourlyProcess({ status, refreshStatus }) {
 
   function handleCollectionUpload(file) {
     if (!file) return;
-    // Match the original: hold the Collection file in memory and send it to
-    // /process (the backend caches it by hash). Do NOT pre-cache + clear — that
-    // left nothing to send and the backend rejected the run.
     setFiles((f) => ({ ...f, collection: file }));
     setUseGDriveCollection(false);
     toast.success(`Collection Report ready: ${file.name}`, "Loaded");
   }
 
-  async function handleHourlyDailyUpload(file) {
-    if (!file) return;
-    setBusy("upload-hourlydaily");
-    try {
-      const res = await saveHourlyDaily(file);
-      toast.success("Hourly Daily Collection saved successfully.", "Uploaded");
-      setFiles((f) => ({ ...f, hourlyDaily: null }));
-      refreshStatus();
-    } catch (e) {
-      toast.error(e.message, "Upload failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  // Google Drive Handlers
+  // Google Drive
   async function handleScanGDrive() {
     if (!gdriveUrl) {
       toast.warn("Please paste a Google Drive folder URL.");
@@ -284,9 +146,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
       const res = await scanGDriveCollection(gdriveUrl);
       if (res.success) {
         setGdriveFiles(res.collection_files || []);
-        if (res.collection_files?.length > 0) {
-          setSelectedGdriveFile(res.collection_files[0]);
-        }
+        if (res.collection_files?.length > 0) setSelectedGdriveFile(res.collection_files[0]);
         toast.success(`Found ${res.collection_files?.length || 0} collection reports.`, "GDrive scanned");
       } else {
         toast.error(res.message || "GDrive scan failed.");
@@ -318,7 +178,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
     }
   }
 
-  // Bundle handlers
+  // Bundles
   async function handleUseBundle() {
     if (!selectedBundle) return;
     setBusy("use-bundle");
@@ -330,7 +190,6 @@ export default function HourlyProcess({ status, refreshStatus }) {
         eodOutputName: selectedBundle.eod_output_file,
         hourlyDailyName: selectedBundle.hourly_daily_file,
       });
-      
       if (res.success) {
         toast.success("Files from EOD Bundle imported successfully.", "Bundle loaded");
         setBundleModal(false);
@@ -345,68 +204,77 @@ export default function HourlyProcess({ status, refreshStatus }) {
     }
   }
 
-  // Run Hourly Process
+  // Main run — driven by the shared processing job (status, steps, live log,
+  // navigation guard + cancellation are all handled by the hook).
   async function handleRunProcess() {
-    setBusy("process");
-    setDone(false);
-    setLogs([{ text: "Hourly merging started…", tone: "info" }]);
-    connectLogs();
-    startTimer();
+    setReport(null);
+    toast.info("Merging Collection onto EOD Output…", "Processing");
     try {
-      const options = {
-        date: targetDateDMY,
-        hour: timeState.hour,
-        minute: timeState.minute,
-        ampm: timeState.ampm,
-        useGDriveCollection,
-      };
-      
-      toast.info("Merging Collection onto EOD output...", "Processing");
-      
-      // Run process — send the Collection (and optional Hourly Daily) the user
-      // loaded, exactly like the original. EOD Output is taken from the backend
-      // (auto-flow or a prior upload).
-      const blobRes = await processHourly({
-        files: { collection: files.collection, hourlyDaily: files.hourlyDaily || null },
-        options,
+      const out = await job.run(async ({ processId, signal, setStep, setSteps, log }) => {
+        setStep(0, "done"); // File uploaded
+        setSteps({ 1: "active", 2: "active", 3: "active" });
+
+        const options = {
+          date: targetDateDMY,
+          hour: timeState.hour,
+          minute: timeState.minute,
+          ampm: timeState.ampm,
+          useGDriveCollection,
+          processId,
+          signal,
+        };
+
+        // Returns the DETAILED Hourly Collection Report and downloads it.
+        const res = await processHourly({ files: { collection: files.collection }, options });
+
+        setSteps({ 1: "done", 2: "done", 3: "done", 5: "done" });
+        setStep(4, "active"); // Saving to reports
+        setReport({ filename: res.filename });
+        log(`Generated "${res.filename}".`, "success");
+
+        // Persist bundle metadata on the server.
+        try {
+          const timeFormatted = `${targetDateDMY} @ ${timeState.hour}:${timeState.minute} ${timeState.ampm}`;
+          await saveBundleToServer({
+            action: "replace",
+            formattedDatetime: timeFormatted,
+            dateOnly: targetDateDMY,
+            accountIdField: res.accountIdField || "",
+          });
+        } catch {}
+
+        // Archive into Reports & Downloads (date-wise).
+        try {
+          const timeFormatted = `${timeState.hour}:${timeState.minute} ${timeState.ampm}`;
+          await snapshotReports(targetDateDMY, timeFormatted);
+        } catch {}
+
+        setStep(4, "done");
+        return { report: { filename: res.filename } };
       });
-      
-      // Save bundle metadata on the server automatically
-      try {
-        const timeFormatted = `${targetDateDMY} @ ${timeState.hour}:${timeState.minute} ${timeState.ampm}`;
-        await saveBundleToServer({
-          action: "replace",
-          formattedDatetime: timeFormatted,
-          dateOnly: targetDateDMY,
-          accountIdField: "",
-        });
-      } catch {}
-      
-      setDone(true);
-      toast.success("Hourly Collection Report processed successfully.", "Finished");
-      
-      // Auto snapshot for the Reports & Downloads tab
-      try {
-        const timeFormatted = `${timeState.hour}:${timeState.minute} ${timeState.ampm}`;
-        await snapshotReports(targetDateDMY, timeFormatted);
-      } catch {}
-      
-      // Since process returns Excel attachment
-      const latestUrl = downloadFastReportUrl(targetDateDMY);
-      window.location.href = latestUrl;
-      
+
+      // Only a SUCCESSFUL run moves to Reports. Cancelled runs return null;
+      // failed runs throw (caught below) — neither saves or navigates.
+      if (!out) return;
+
+      toast.success("Hourly Report generated and saved to Reports & Downloads.", "Finished");
       refreshStatus();
+      // Focus the Reports & Downloads section after success.
+      if (goToReports) setTimeout(goToReports, 600);
     } catch (e) {
-      pushLog(e.message, "error");
-      toast.error(e.message, "Processing failed");
-    } finally {
-      clearInterval(timerRef.current);
-      setBusy("");
-      setTimeout(() => esRef.current?.close(), 1500);
+      if (!e?.cancelled) toast.error(e.message, "Processing failed");
     }
   }
 
-  // Fast Report Execution
+  async function handleSaveCopy() {
+    try {
+      const res = await saveToDownloads();
+      if (res.success) toast.success(`Saved to Downloads: ${res.filename || "report"}`, "Saved");
+    } catch (e) {
+      toast.error(e.message, "Save failed");
+    }
+  }
+
   async function handleFastReport() {
     setBusy("fast-report");
     try {
@@ -416,19 +284,13 @@ export default function HourlyProcess({ status, refreshStatus }) {
         minute: timeState.minute,
         ampm: timeState.ampm,
       });
-      
       if (res.success) {
-        toast.success("Fast hourly report generated.", "Success");
-        
-        // Auto snapshot for the Reports & Downloads tab
+        toast.success("Fast summary report generated.", "Success");
         try {
           const timeFormatted = `${timeState.hour}:${timeState.minute} ${timeState.ampm}`;
           await snapshotReports(targetDateDMY, timeFormatted);
         } catch {}
-        
-        // Trigger download of fast report
-        const dlUrl = downloadFastReportUrl(targetDateDMY);
-        window.location.href = dlUrl;
+        window.location.href = downloadFastReportUrl(targetDateDMY);
       }
     } catch (e) {
       toast.error(e.message, "Fast Report failed");
@@ -437,76 +299,60 @@ export default function HourlyProcess({ status, refreshStatus }) {
     }
   }
 
-  // Hourly only needs its own inputs (EOD Output + a Collection report). It does
-  // NOT depend on the DuckDB master files — that's an EOD-only requirement.
+  // Hourly only needs EOD Output + a Collection report. It does NOT depend on
+  // the DuckDB master files — that's an EOD-only requirement.
   const hasEod = Boolean(status?.backend?.eodOutput);
   const hasCollection = useGDriveCollection || Boolean(files.collection);
-  const hasHourlyDaily =
-    Boolean(files.hourlyDaily) ||
-    Boolean(status?.backend?.hourlyDailyFile && !status?.backend?.hourlyDailyExpired);
   const inputsMissing = !hasEod || !hasCollection;
 
-  const canProcess = useMemo(() => {
-    if (busy) return false;
-    return hasEod && hasCollection;
-  }, [busy, hasEod, hasCollection]);
+  const canProcess = useMemo(
+    () => !busy && !job.busy && hasEod && hasCollection,
+    [busy, job.busy, hasEod, hasCollection]
+  );
+  const showPanel = job.status !== "idle";
 
-  const showProgress = busy === "process" || elapsed > 0 || done;
+  const selectedTimeLabel = `${timeState.hour}:${timeState.minute} ${timeState.ampm}`;
 
   return (
     <div className="eod-grid">
       <div className="col" style={{ gap: 18 }}>
-        <div className="panel">
-          <div className="panel-header">
+        <div className="panel hourly-config">
+          <div className="panel-header hourly-gradient-head">
             <div>
               <p className="eyebrow">Hourly Collection Processing</p>
-              <h2>Upload & Configure</h2>
-              <p className="sub">Merge hourly collection reports with today's EOD Output instantly.</p>
+              <h2>Upload &amp; Configure</h2>
+              <p className="sub">Merge a Collection Report onto today's EOD Output — exact same engine, modern flow.</p>
             </div>
-            {busy === "process" && (
+            {job.running && (
               <span className="badge badge-info">
-                <Spinner size={13} /> Merging data
+                <Loader2 size={13} className="spin" /> Merging
               </span>
             )}
           </div>
 
           {/* Quick-access bar */}
           <div className="hourly-quick-actions">
-            <Button
-              variant="outline"
-              icon={Zap}
-              className="gdrive-quick grow"
-              onClick={() => setGdriveModal(true)}
-            >
+            <Button variant="outline" icon={Zap} className="gdrive-quick grow" onClick={() => setGdriveModal(true)}>
               Google Drive Sync
             </Button>
-            <Button
-              variant="outline"
-              icon={FolderOpen}
-              className="bundle-quick grow"
-              onClick={() => setBundleModal(true)}
-            >
+            <Button variant="outline" icon={FolderOpen} className="bundle-quick grow" onClick={() => setBundleModal(true)}>
               Load EOD Bundle
             </Button>
           </div>
 
-          {/* EOD Output auto-flows from your latest EOD run — you only upload it
-              if it is missing. The Collection Report is the one file you upload
-              each time to run the hourly merge. Hourly Daily is optional (VBA). */}
+          {/* EOD Output (auto from EOD run; upload only if missing) */}
           {hasEod ? (
-            <div className="file-pill" style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", marginBottom: 14 }}>
+            <div className="hourly-eod-pill">
               <CheckCircle2 size={15} style={{ color: "var(--success)" }} />
-              <span style={{ fontSize: 12.5 }}>
+              <span>
                 <b>EOD Output ready</b>
                 {status?.backend?.eodOutputSource === "eod-auto" ? " — from your EOD run" : " — uploaded"}
                 {status?.backend?.eodOutput ? ` · ${status.backend.eodOutput}` : ""}
               </span>
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
-              <strong style={{ fontSize: 12.5, color: "var(--text-soft)" }}>
-                EOD Output · Required — run EOD first, or upload it here
-              </strong>
+            <div className="hourly-field">
+              <strong className="hourly-field-label">EOD Output · Required — run EOD first, or upload it here</strong>
               <FileDrop
                 label="Upload EOD Output Excel"
                 hint="Required · .xlsx"
@@ -517,11 +363,9 @@ export default function HourlyProcess({ status, refreshStatus }) {
             </div>
           )}
 
-          {/* The one file you upload each run */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <strong style={{ fontSize: 12.5, color: "var(--text-soft)" }}>
-              Collection Report · Required — upload this to run
-            </strong>
+          {/* Collection Report — the one required file uploaded each run */}
+          <div className="hourly-field">
+            <strong className="hourly-field-label">Collection Report · Required — upload this to run</strong>
             <FileDrop
               label={hasCollection ? "Replace Collection Report" : "Upload the Collection Report Excel"}
               hint={
@@ -537,78 +381,63 @@ export default function HourlyProcess({ status, refreshStatus }) {
             />
           </div>
 
-          {/* Optional Hourly Daily — only for the VBA Merge step, hidden by default */}
-          {showHourlyDaily || hasHourlyDaily ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
-              <strong style={{ fontSize: 12.5, color: "var(--text-soft)" }}>Hourly Daily · Optional (VBA Merge)</strong>
-              <FileDrop
-                label={hasHourlyDaily ? "Replace Hourly Daily" : "Upload Hourly Daily Report"}
-                hint={hasHourlyDaily ? `Loaded: ${status.backend.hourlyDailyFile}` : "Optional · For VBA Merge"}
-                file={files.hourlyDaily}
-                onFile={handleHourlyDailyUpload}
-                disabled={busy === "upload-hourlydaily"}
-              />
-              {hasHourlyDaily && (
-                <div className="file-pill" style={{ fontSize: 11, padding: "3px 8px", background: "var(--warn-soft)", color: "#a16207" }}>
-                  Expires in: <span className="countdown-box" style={{ color: "#a16207" }}>{countdown}</span>
-                </div>
-              )}
+          {/* Date */}
+          <div className="hourly-field">
+            <strong className="hourly-field-label">Target Date</strong>
+            <div className="hourly-date-input">
+              <CalendarDays size={16} className="text-muted" />
+              <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
             </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setShowHourlyDaily(true)}
-              style={{ marginTop: 10, fontSize: 12, background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: 0, textAlign: "left" }}
-            >
-              + Add optional Hourly Daily file (only needed for VBA Merge)
-            </button>
-          )}
+          </div>
 
-          {/* Date Picker + Time Select Grid */}
-          <div className="control-grid" style={{ marginTop: 12 }}>
-            <div className="field">
-              <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 6 }}>Target Date</label>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--surface-3)", border: "1px solid var(--border)", borderRadius: "8px", padding: "6px 12px" }}>
-                <CalendarDays size={16} className="text-muted" />
-                <input
-                  type="date"
-                  value={targetDate}
-                  onChange={(e) => setTargetDate(e.target.value)}
-                  style={{ background: "transparent", border: "none", color: "var(--text)", outline: "none", fontSize: 13, width: "100%" }}
-                />
-              </div>
+          {/* Time — modern chip selector */}
+          <div className="hourly-field">
+            <div className="hourly-time-head">
+              <strong className="hourly-field-label" style={{ margin: 0 }}>Report Run Time</strong>
+              <span className="hourly-time-chip">{selectedTimeLabel}</span>
             </div>
 
-            <div className="field">
-              <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", display: "block", marginBottom: 6 }}>Report Run Time</label>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <select
-                  value={timeState.hour}
-                  onChange={(e) => setTimeState({ ...timeState, hour: e.target.value })}
-                  style={{ background: "var(--surface-3)", border: "1px solid var(--border)", borderRadius: "8px", padding: "6px 10px", color: "var(--text)", outline: "none", fontSize: 13 }}
+            <span className="hourly-time-sub">Hour</span>
+            <div className="number-grid hourly-hour-grid">
+              {HOURS.map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  className={`number-btn ${timeState.hour === h ? "active" : ""}`}
+                  onClick={() => setTimeState((t) => ({ ...t, hour: h }))}
                 >
-                  {Array.from({ length: 12 }, (_, i) => String(i + 1)).map((h) => (
-                    <option key={h} value={h}>{h}</option>
-                  ))}
-                </select>
-                <select
-                  value={timeState.minute}
-                  onChange={(e) => setTimeState({ ...timeState, minute: e.target.value })}
-                  style={{ background: "var(--surface-3)", border: "1px solid var(--border)", borderRadius: "8px", padding: "6px 10px", color: "var(--text)", outline: "none", fontSize: 13 }}
+                  {h}
+                </button>
+              ))}
+            </div>
+
+            <span className="hourly-time-sub">Minute</span>
+            <div className="number-grid hourly-min-grid">
+              {MINUTES.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`number-btn ${timeState.minute === m ? "active" : ""}`}
+                  onClick={() => setTimeState((t) => ({ ...t, minute: m }))}
                 >
-                  {["00", "10", "20", "30", "40", "50"].map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-                <select
-                  value={timeState.ampm}
-                  onChange={(e) => setTimeState({ ...timeState, ampm: e.target.value })}
-                  style={{ background: "var(--surface-3)", border: "1px solid var(--border)", borderRadius: "8px", padding: "6px 10px", color: "var(--text)", outline: "none", fontSize: 13 }}
+                  :{m}
+                </button>
+              ))}
+            </div>
+
+            <span className="hourly-time-sub">Meridiem</span>
+            <div className="ampm-grid hourly-ampm">
+              {["AM", "PM"].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  className={`demo-ampm-btn ${timeState.ampm === p ? "active" : ""}`}
+                  onClick={() => setTimeState((t) => ({ ...t, ampm: p }))}
                 >
-                  <option value="AM">AM</option>
-                  <option value="PM">PM</option>
-                </select>
-              </div>
+                  <span className="ampm-label">{p}</span>
+                  <span className="ampm-desc">{p === "AM" ? "Morning" : "Afternoon"}</span>
+                </button>
+              ))}
             </div>
           </div>
 
@@ -622,10 +451,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
                 : "Upload a Collection Report above (or use Google Drive Sync) to run."}
             </div>
           ) : (
-            <div
-              className="banner"
-              style={{ marginTop: 16, marginBottom: 8, background: "var(--success-soft)", color: "#15803d", display: "flex", alignItems: "center", gap: 8 }}
-            >
+            <div className="banner hourly-ready">
               <CheckCircle2 size={15} /> Ready to process — click <b>Run Hourly Processing</b>.
             </div>
           )}
@@ -635,7 +461,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
               variant="success"
               icon={Play}
               disabled={!canProcess}
-              loading={busy === "process"}
+              loading={job.running}
               onClick={handleRunProcess}
               style={{ flex: 2 }}
             >
@@ -644,7 +470,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
             <Button
               variant="primary"
               icon={Zap}
-              disabled={!status?.backend?.fastReportAvailable || busy === "process"}
+              disabled={!status?.backend?.fastReportAvailable || job.busy}
               loading={busy === "fast-report"}
               onClick={handleFastReport}
               style={{ flex: 1 }}
@@ -654,44 +480,38 @@ export default function HourlyProcess({ status, refreshStatus }) {
           </div>
         </div>
 
-        {/* Progress + live log */}
-        {showProgress && (
-          <div className="panel" style={{ marginTop: 18 }}>
-            <div className="panel-header" style={{ marginBottom: 14 }}>
-              <div>
-                <p className="eyebrow">Pipeline</p>
-                <h2>{done ? "Completed" : busy === "process" ? "Processing…" : "Last run"}</h2>
-              </div>
-              <div className="row">
-                <span className="badge badge-muted">{elapsed ? `${elapsed.toFixed(1)}s` : "0.0s"}</span>
-                {done && (
-                  <span className="badge badge-success">
-                    <CheckCircle2 size={13} /> Done
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="log-stream" ref={logBoxRef}>
-              {logs.map((l, i) => (
-                <p key={i} className={`log-line ${l.tone}`}>
-                  <span className="log-dot" />
-                  {l.text}
-                </p>
-              ))}
-            </div>
-          </div>
+        {/* Shared processing panel: status, step timeline, live log, stop. */}
+        {showPanel && (
+          <ProcessingPanel
+            job={job}
+            eyebrow="Pipeline"
+            onRetry={canProcess ? handleRunProcess : undefined}
+            reportCard={
+              report && (
+                <div className="hourly-report-card">
+                  <FileSpreadsheet size={20} className="text-muted" />
+                  <div className="hourly-report-meta">
+                    <strong title={report.filename}>{report.filename}</strong>
+                    <span>Saved · available in Reports &amp; Downloads</span>
+                  </div>
+                  <Button variant="outline" icon={Download} onClick={handleSaveCopy}>
+                    Download
+                  </Button>
+                </div>
+              )
+            }
+          />
         )}
       </div>
 
-      {/* Side column: which inputs are currently loaded */}
+      {/* Side column */}
       <div className="col" style={{ gap: 18 }}>
         <div className="panel">
           <div className="panel-header" style={{ marginBottom: 12 }}>
             <div>
               <p className="eyebrow">Inputs</p>
               <h2>Loaded Files</h2>
-              <p className="sub">Upload all files yourself. Replace any of them anytime.</p>
+              <p className="sub">EOD Output auto-flows from EOD. Upload only the Collection Report.</p>
             </div>
             <Archive size={18} className="muted" />
           </div>
@@ -715,13 +535,13 @@ export default function HourlyProcess({ status, refreshStatus }) {
             <div>
               <strong style={{ fontSize: 13.5 }}>Hourly Operations</strong>
               <p className="muted" style={{ margin: "4px 0 0", fontSize: 12.5 }}>
-                1. <b>Upload the Collection Report</b> (or use Google Drive Sync) — this is the only file you provide each run.
+                1. <b>Upload the Collection Report</b> (or use Google Drive Sync) — the only file you provide each run.
               </p>
               <p className="muted" style={{ margin: "4px 0 0", fontSize: 12.5 }}>
-                2. The <b>EOD Output</b> is taken automatically from your latest EOD run (upload it only if none exists).
+                2. The <b>EOD Output</b> comes automatically from your latest EOD run (upload only if none exists).
               </p>
               <p className="muted" style={{ margin: "4px 0 0", fontSize: 12.5 }}>
-                3. Click <b>Run Hourly Processing</b> to merge them into a clean Excel report.
+                3. Click <b>Run Hourly Processing</b> — the detailed report downloads and is archived under Reports.
               </p>
               <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
                 🧹 Stale Hourly reports are deleted after 3 days. Config and contacts remain permanent.
@@ -731,7 +551,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
         </div>
       </div>
 
-      {/* Google Drive sync Modal */}
+      {/* Google Drive modal */}
       {gdriveModal && (
         <Modal
           title="Google Drive — Collection Report"
@@ -741,12 +561,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
               <Button variant="ghost" onClick={() => setGdriveModal(false)}>
                 Cancel
               </Button>
-              <Button
-                variant="primary"
-                disabled={!selectedGdriveFile}
-                loading={busy === "gdrive-download"}
-                onClick={handleDownloadGDrive}
-              >
+              <Button variant="primary" disabled={!selectedGdriveFile} loading={busy === "gdrive-download"} onClick={handleDownloadGDrive}>
                 Download &amp; Use
               </Button>
             </>
@@ -761,11 +576,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
               placeholder="Paste Google Drive folder URL"
               style={{ flex: 1 }}
             />
-            <Button
-              variant="outline"
-              loading={busy === "gdrive-scan"}
-              onClick={handleScanGDrive}
-            >
+            <Button variant="outline" loading={busy === "gdrive-scan"} onClick={handleScanGDrive}>
               Scan
             </Button>
           </div>
@@ -790,7 +601,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
         </Modal>
       )}
 
-      {/* EOD Bundle Modal */}
+      {/* EOD Bundle modal */}
       {bundleModal && (
         <Modal
           title="EOD Bundle Selection"
@@ -800,12 +611,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
               <Button variant="ghost" onClick={() => setBundleModal(false)}>
                 Cancel
               </Button>
-              <Button
-                variant="primary"
-                disabled={!selectedBundle}
-                loading={busy === "use-bundle"}
-                onClick={handleUseBundle}
-              >
+              <Button variant="primary" disabled={!selectedBundle} loading={busy === "use-bundle"} onClick={handleUseBundle}>
                 Confirm &amp; Use
               </Button>
             </>
@@ -825,9 +631,7 @@ export default function HourlyProcess({ status, refreshStatus }) {
                   >
                     <div>
                       <strong>{bundle.name}</strong>
-                      <div className="bundle-item-files">
-                         Files: {bundle.files?.join(", ")}
-                      </div>
+                      <div className="bundle-item-files">Files: {bundle.files?.join(", ")}</div>
                     </div>
                   </div>
                 );

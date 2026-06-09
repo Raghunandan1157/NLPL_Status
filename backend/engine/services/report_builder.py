@@ -1312,14 +1312,32 @@ def _build_summary_sheet(wb, pc_idx, sheet_name, scope, report_date, fmts,
                     f'({sheet_name} - {display})')
 
 
-def _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA', prefix='OverAll'):
-    """On-Date sheet — EOD/report-date on-date on the LEFT and TOMORROW
-    (next_day_str) on the RIGHT, two blocks side by side (no VS / difference).
+def _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA', prefix='OverAll',
+                        shift_to_today=False):
+    """On-Date sheet — two demand blocks side by side (no VS / difference).
 
-    Both sides use the exact same column structure and styling; only the source
-    metric differs — od_demand/od_collection (left = the EOD/report date) vs
-    od_demand_next/od_collection_next (right = tomorrow). DATA logic unchanged.
+    Default (shift_to_today=False, unchanged behaviour): LEFT = report/EOD date
+    (od_demand), RIGHT = next day (od_demand_next).
+
+    shift_to_today=True (OverAll On-Date sheet only): anchor on the GENERATION
+    date instead of the EOD as-on date, so LEFT = TODAY (target+1 = od_demand_next)
+    and RIGHT = TOMORROW (target+2 = od_demand_next2). This only affects label
+    dates + which precomp columns are read here; no other sheet is touched.
     """
+    if shift_to_today:
+        left_date = next_day_str  # target_date + 1 == today
+        try:
+            _tom = pd.to_datetime(next_day_str, format='%d-%m-%Y') + pd.Timedelta(days=1)
+            right_date = _tom.strftime('%d-%m-%Y')  # target_date + 2 == tomorrow
+        except Exception:
+            right_date = next_day_str
+        l_dem_key, l_col_key = 'od_demand_next', 'od_collection_next'
+        r_dem_key, r_col_key = 'od_demand_next2', 'od_collection_next2'
+    else:
+        left_date, right_date = report_date, next_day_str
+        l_dem_key, l_col_key = 'od_demand', 'od_collection'
+        r_dem_key, r_col_key = 'od_demand_next', 'od_collection_next'
+
     ws2 = wb.add_worksheet(f'tom_{prefix}_On-Date')
     # Left block cols 1-4, narrow gap col 5, right block cols 6-9.
     ws2.set_column(0, 0, 2)
@@ -1333,7 +1351,7 @@ def _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA',
     LEFT, RIGHT = 1, 6
 
     ws2.write(0, 0,
-              f'On-Date Demand Report - {report_date} & {next_day_str}',
+              f'On-Date Demand Report - {left_date} & {right_date}',
               fmts['title'])
 
     row = 2
@@ -1346,9 +1364,9 @@ def _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA',
 
         # Side titles (no VS): left = EOD/report date, right = tomorrow.
         ws2.merge_range(row, LEFT, row, LEFT + 3,
-                        f'{title} ON-DATE DEMAND - {report_date}', fmts['title'])
+                        f'{title} ON-DATE DEMAND - {left_date}', fmts['title'])
         ws2.merge_range(row, RIGHT, row, RIGHT + 3,
-                        f'{title} ON-DATE DEMAND - {next_day_str}', fmts['title'])
+                        f'{title} ON-DATE DEMAND - {right_date}', fmts['title'])
         row += 1
         # Column headers — identical on both sides.
         for base in (LEFT, RIGHT):
@@ -1360,10 +1378,10 @@ def _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA',
 
         for name in items:
             m = data[name]
-            l_d = _safe(m.get('od_demand', 0))
-            l_c = _safe(m.get('od_collection', 0))
-            r_d = _safe(m.get('od_demand_next', 0))
-            r_c = _safe(m.get('od_collection_next', 0))
+            l_d = _safe(m.get(l_dem_key, 0))
+            l_c = _safe(m.get(l_col_key, 0))
+            r_d = _safe(m.get(r_dem_key, 0))
+            r_c = _safe(m.get(r_col_key, 0))
             # Left: EOD/report date
             ws2.write(row, LEFT, name, fmts['d_name'])
             _write_val(ws2, row, LEFT + 1, l_d, fmts['d_orange'], fmts['d_orange_str'])
@@ -1378,10 +1396,10 @@ def _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA',
 
         gt = data.get('Grand Total')
         if gt is not None:
-            l_d = _safe(gt.get('od_demand', 0))
-            l_c = _safe(gt.get('od_collection', 0))
-            r_d = _safe(gt.get('od_demand_next', 0))
-            r_c = _safe(gt.get('od_collection_next', 0))
+            l_d = _safe(gt.get(l_dem_key, 0))
+            l_c = _safe(gt.get(l_col_key, 0))
+            r_d = _safe(gt.get(r_dem_key, 0))
+            r_c = _safe(gt.get(r_col_key, 0))
             ws2.write(row, LEFT, 'Grand Total', fmts['gt_name'])
             _write_val(ws2, row, LEFT + 1, l_d, fmts['gt'], fmts['gt_str'])
             _write_val(ws2, row, LEFT + 2, l_c, fmts['gt'], fmts['gt_str'])
@@ -2164,9 +2182,10 @@ def build_report(pc_df, output_file, target_date, has_officer_col=True, sheets_d
     except Exception as e:
         logging.warning(f"Failed to build 'IL Reports' sheet: {e}")
 
-    # 2. OverAll tom_On-Date sheet
-    _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA', prefix='OverAll')
-    _emit('tom_OverAll_On-Date', lambda w, f: _build_ondate_sheet(w, pc_idx, report_date, next_day_str, f, scope='OA', prefix='OverAll'))
+    # 2. OverAll tom_On-Date sheet — anchored on the generation date so it shows
+    #    TODAY (target+1) and TOMORROW (target+2). Only this sheet is shifted.
+    _build_ondate_sheet(wb, pc_idx, report_date, next_day_str, fmts, scope='OA', prefix='OverAll', shift_to_today=True)
+    _emit('tom_OverAll_On-Date', lambda w, f: _build_ondate_sheet(w, pc_idx, report_date, next_day_str, f, scope='OA', prefix='OverAll', shift_to_today=True))
 
     # 3. FY sheet
     fy_label = _get_fy_label(target_date)

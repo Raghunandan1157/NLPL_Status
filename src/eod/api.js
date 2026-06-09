@@ -56,7 +56,8 @@ export function processEod({ files, options }) {
   fd.append("cachePar", String(options.cachePar));
   fd.append("cacheCollection", String(options.cacheCollection));
   fd.append("autoFixSheets", String(options.autoFixSheets));
-  return requestJson("/eod/process", { method: "POST", body: fd });
+  if (options.processId) fd.append("processId", options.processId);
+  return requestJson("/eod/process", { method: "POST", body: fd, signal: options.signal });
 }
 
 /** SSE log stream emitted by the backend during processing. */

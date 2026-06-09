@@ -156,11 +156,48 @@ def compute_dashboard_kpis(report_data, df_collection=None):
 
 # ── Rankings ──────────────────────────────────────────────────────────
 
-def compute_rankings(report_data, level='Region', n=5):
+def _rollup_rows_by_state(rows, region_to_state):
+    """Aggregate company Region rows into true-State rows (KARNATAKA, ANDHRA
+    PRADESH, …). Region names absent from the map pass through unchanged."""
+    def _num(v):
+        try:
+            return float(v) if v not in (None, '') else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    agg = {}
+    for r in rows:
+        region = str(r.get('name', '')).strip()
+        state = region_to_state.get(region) or region_to_state.get(region.upper()) or region
+        a = agg.get(state)
+        if a is None:
+            a = {'name': state, 'demand': 0.0, 'collection': 0.0, 'ftod': 0.0}
+            agg[state] = a
+        a['demand'] += _num(r.get('demand'))
+        a['collection'] += _num(r.get('collection'))
+        a['ftod'] += _num(r.get('ftod'))
+    for a in agg.values():
+        a['demand'] = int(a['demand'])
+        a['collection'] = int(a['collection'])
+        a['ftod'] = int(a['ftod'])
+        a['collection_pct'] = round(100.0 * a['collection'] / a['demand'], 2) if a['demand'] else 0
+    return list(agg.values())
+
+
+def compute_rankings(report_data, level='Region', n=5, region_to_state=None):
     """
     Top *n* and bottom *n* entities by collection % at *level*.
     Also returns all rows sorted descending for the bar chart.
+
+    level='State' rolls the company Region grouping up to true states using
+    region_to_state (so Karnataka districts collapse into KARNATAKA).
     """
+    if level == 'State':
+        sec0 = _get_section_table(report_data, 0, 'Region')
+        rows = _rollup_rows_by_state(list(sec0.get('rows', [])) if sec0 else [], region_to_state or {})
+        sorted_desc = sorted(rows, key=lambda r: r.get('collection_pct', 0), reverse=True)
+        sorted_asc = sorted(rows, key=lambda r: r.get('collection_pct', 0))
+        return {'top': sorted_desc[:n], 'bottom': sorted_asc[:n], 'all': sorted_desc}
+
     sec0 = _get_section_table(report_data, 0, level)
     if not sec0:
         return {'top': [], 'bottom': [], 'all': []}
