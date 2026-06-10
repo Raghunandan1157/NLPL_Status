@@ -64,7 +64,9 @@ function Shell() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-logo">NS</div>
+          <div className="brand-logo">
+            <img src="/logo.png" alt="Navachetana Livelihoods" />
+          </div>
           <div className="brand-text">
             <strong>NLPL Status</strong>
             <small>OPERATIONS CONSOLE</small>

@@ -41,14 +41,9 @@ export default function HomePage({ health, onOpen }) {
           </span>
           <h1>Run your daily collection workflows from one clean place.</h1>
           <p>
-            Upload the day's files, generate the EOD report, and deliver it over email and WhatsApp —
-            all backed by the unified collection engine.
+            Upload the day's files, generate reports, and deliver them over email and WhatsApp —
+            all backed by the unified collection engine. Pick a module below to get started.
           </p>
-          <div className="hero-actions">
-            <button className="btn btn-primary" onClick={() => onOpen("eod")}>
-              Open EOD Module <ArrowRight size={16} />
-            </button>
-          </div>
         </div>
         <div className="hero-status">
           <StatusChip
@@ -78,7 +73,7 @@ export default function HomePage({ health, onOpen }) {
       </div>
 
       <div className="module-grid">
-        {MODULES.map((m) => {
+        {MODULES.map((m, i) => {
           const Icon = m.icon;
           const live = m.status === "live";
           return (
@@ -87,17 +82,21 @@ export default function HomePage({ health, onOpen }) {
               className={`module-card accent-${m.accent} ${live ? "live" : "soon"}`}
               role={live ? "button" : undefined}
               tabIndex={live ? 0 : undefined}
+              style={{ animationDelay: `${Math.min(i, 12) * 55}ms` }}
               onClick={() => live && onOpen(m.id)}
               onKeyDown={(e) => live && (e.key === "Enter" || e.key === " ") && onOpen(m.id)}
             >
+              <span className="module-glow" aria-hidden="true" />
               <div className="module-top">
                 <span className="module-icon">
-                  <Icon size={22} />
+                  <Icon size={19} strokeWidth={2.1} />
                 </span>
                 {live ? (
-                  <span className="badge badge-success">Live</span>
+                  <span className="module-status live">
+                    <i className="live-dot" /> Live
+                  </span>
                 ) : (
-                  <span className="badge badge-muted">Coming soon</span>
+                  <span className="module-status soon">Coming soon</span>
                 )}
               </div>
               <h3>{m.name}</h3>
@@ -112,11 +111,12 @@ export default function HomePage({ health, onOpen }) {
                   ))}
                 </div>
               )}
-              {live && (
-                <div className="module-open">
-                  Open module <ArrowRight size={15} />
-                </div>
-              )}
+              <div className="module-open">
+                <span>{live ? "Open module" : "On the roadmap"}</span>
+                <span className="module-open-arrow">
+                  <ArrowRight size={14} strokeWidth={2.4} />
+                </span>
+              </div>
             </div>
           );
         })}
