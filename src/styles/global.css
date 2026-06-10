@@ -353,7 +353,8 @@ button {
   box-shadow: 0 8px 20px rgba(99, 102, 241, 0.28);
 }
 .btn-primary:not(:disabled):hover {
-  box-shadow: 0 10px 26px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 12px 28px rgba(99, 102, 241, 0.45);
+  filter: brightness(1.04);
 }
 .btn-success {
   background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
@@ -361,7 +362,8 @@ button {
   box-shadow: 0 8px 20px rgba(22, 163, 74, 0.26);
 }
 .btn-success:not(:disabled):hover {
-  box-shadow: 0 10px 26px rgba(22, 163, 74, 0.38);
+  box-shadow: 0 12px 28px rgba(22, 163, 74, 0.42);
+  filter: brightness(1.04);
 }
 .btn-ghost {
   background: var(--surface);
@@ -398,14 +400,16 @@ button {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04),
+    0 8px 24px -14px rgba(16, 24, 40, 0.12);
 }
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04),
+    0 8px 24px -14px rgba(16, 24, 40, 0.12);
   padding: 22px;
 }
 .panel-header {
@@ -445,18 +449,22 @@ button {
 }
 .input {
   width: 100%;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   font-size: 13.5px;
   font-family: inherit;
   color: var(--text);
-  background: var(--surface);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  background: var(--surface-2);
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.input:hover:not(:focus) {
+  border-color: var(--border-strong);
 }
 .input:focus {
   outline: none;
   border-color: var(--primary);
+  background: var(--surface);
   box-shadow: var(--ring);
 }
 
@@ -700,13 +708,16 @@ button {
   border: 1.5px dashed var(--border-strong);
   background: var(--surface-2);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 15px 16px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: border-color 0.2s ease, background 0.2s ease,
+    box-shadow 0.2s ease, transform 0.2s cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 .filedrop:hover:not(:disabled) {
   border-color: var(--primary);
   background: var(--grad-primary-soft);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 22px -14px rgba(99, 102, 241, 0.55);
 }
 .filedrop:disabled {
   opacity: 0.55;
@@ -717,6 +728,7 @@ button {
   border-style: solid;
   background: var(--grad-primary-soft);
   transform: scale(1.01);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.14);
 }
 .filedrop.ready {
   border-style: solid;
@@ -732,18 +744,26 @@ button {
 .filedrop-icon {
   width: 42px;
   height: 42px;
-  border-radius: 11px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eef2ff, #f3efff);
+  border: 1px solid #e4e2fb;
   display: grid;
   place-items: center;
-  color: var(--text-muted);
+  color: var(--primary-600);
   flex: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  transition: transform 0.2s ease;
+}
+.filedrop:hover:not(:disabled) .filedrop-icon {
+  transform: scale(1.05);
 }
 .filedrop.ready .filedrop-icon,
+.filedrop.locked .filedrop-icon,
 .filedrop-icon.ok {
-  color: var(--success);
-  border-color: #b9e6c7;
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 7px 15px -5px rgba(22, 163, 74, 0.55);
 }
 .filedrop-text {
   min-width: 0;

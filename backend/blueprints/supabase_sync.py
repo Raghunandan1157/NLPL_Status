@@ -175,6 +175,61 @@ def _rpc(fn, payload):
         return True, None
 
 
+@supabase_bp.route('/test-connection', methods=['GET'])
+def test_connection():
+    """Safe, read-only connectivity + auth check for the Supabase client.
+
+    Performs a single GET on the PostgREST root ({SUPABASE_URL}/rest/v1/) using
+    the configured service key. It does NOT read table rows, and does NOT
+    insert / update / delete / call any sync RPC — it only confirms the project
+    is reachable and (when a key is present) that the key authenticates.
+    """
+    url = (getattr(config, 'SUPABASE_URL', '') or '').rstrip('/')
+    key = getattr(config, 'SUPABASE_SERVICE_KEY', '') or ''
+    result = {
+        'url': url,
+        'clientInitialized': bool(url),
+        'serviceKeyConfigured': bool(key),
+    }
+    if not url:
+        result.update(success=False, reachable=False,
+                      message='SUPABASE_URL not configured (.env)')
+        return jsonify(result), 400
+
+    try:
+        resp = http_requests.get(
+            f'{url}/rest/v1/',
+            headers={'apikey': key, 'Authorization': f'Bearer {key}'} if key else {},
+            timeout=15,
+        )
+    except http_requests.exceptions.RequestException as e:
+        result.update(success=False, reachable=False,
+                      message=f'Supabase not reachable: {e}')
+        return jsonify(result), 502
+
+    result['reachable'] = True
+    result['httpStatus'] = resp.status_code
+    if not key:
+        result.update(
+            success=False, authenticated=False,
+            message='Supabase project reachable. SUPABASE_SERVICE_ROLE_KEY is empty — '
+                    'paste the service_role key in .env, then re-test to verify auth.')
+        return jsonify(result), 200
+    if resp.status_code in (200, 204, 404):
+        # 200/204 = authenticated PostgREST root; 404 with a valid key still
+        # proves the key was accepted (project reachable + auth OK).
+        result.update(success=True, authenticated=True,
+                      message='Supabase connection and authentication successful.')
+        return jsonify(result), 200
+    if resp.status_code in (401, 403):
+        result.update(success=False, authenticated=False,
+                      message=f'Reachable, but the service key was rejected (HTTP {resp.status_code}).')
+        return jsonify(result), 200
+    result.update(success=False, authenticated=False,
+                  message=f'Reachable, unexpected response (HTTP {resp.status_code}).')
+    return jsonify(result), 200
+
+
 @supabase_bp.route('/check-date', methods=['GET'])
 def check_date():
     """How many rows already exist in _stage_daily_performance for a date.

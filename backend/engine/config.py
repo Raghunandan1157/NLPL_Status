@@ -131,6 +131,12 @@ EOD_API_KEY = os.environ.get('EOD_API_KEY', '')
 # Supabase (Grow_With_Me schema) — EOD daily_performance mirror.
 # EOD push writes to Grow_With_Me._stage_daily_performance via the
 # public.eod_sync_stage_daily / eod_check_stage_date RPC wrappers.
-# SUPABASE_SERVICE_KEY is the service_role JWT — keep it out of git (.env).
+# The service_role JWT is read from the environment only (never hardcoded),
+# keep it out of git (.env). Accept either SUPABASE_SERVICE_ROLE_KEY (the name
+# used in .env) or the legacy SUPABASE_SERVICE_KEY — same value, no behaviour
+# change to the existing sync RPCs which read config.SUPABASE_SERVICE_KEY.
 SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://knbijsnghjcaocwtjvvw.supabase.co')
-SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
+SUPABASE_SERVICE_KEY = (
+    os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    or os.environ.get('SUPABASE_SERVICE_KEY', '')
+)
