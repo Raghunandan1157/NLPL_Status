@@ -103,7 +103,7 @@ export default function OdReportModule() {
               <div>
                 <p className="eyebrow">Step 1 · Inputs</p>
                 <h2>Upload & Process</h2>
-                <p className="sub">PAR is required. Month-end (.xlsb) and Insurance are optional but enrich the report.</p>
+                <p className="sub">PAR is required. Month-end (.xlsx/.xlsb) and Insurance are optional but enrich the report.</p>
               </div>
               {busy === "process" && (
                 <span className="badge badge-info">
@@ -127,9 +127,9 @@ export default function OdReportModule() {
                 <FileDrop locked lockedText="Month-End OD file ready" hint={odStaged.filename} />
               ) : (
                 <FileDrop
-                  label="Month-End OD (.xlsb)"
-                  hint="Optional · .xlsb"
-                  accept=".xlsb"
+                  label="Month-End OD (.xlsx/.xlsb)"
+                  hint="Optional · .xlsx/.xlsb"
+                  accept=".xlsx,.xlsb"
                   file={null}
                   onFile={handleOd}
                   disabled={busy === "od"}
@@ -217,7 +217,7 @@ export default function OdReportModule() {
                   <b> OD Report.xlsx</b> is written to your Downloads folder.
                 </p>
                 <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
-                  Stage the month-end <b>.xlsb</b> and Insurance files once; they persist for
+                  Stage the month-end <b>.xlsx/.xlsb</b> and Insurance files once; they persist for
                   subsequent runs until replaced.
                 </p>
               </div>

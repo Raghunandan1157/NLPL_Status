@@ -3,6 +3,7 @@ node_modules/
 
 # Operational/runtime data (regenerable, large, contains client PII)
 eod_data/
+backend/engine/data/
 
 # Python caches
 __pycache__/
