@@ -16,7 +16,8 @@ project with a fresh, polished UI and a one-command startup.
 ## Run it (one command)
 
 ```bash
-npm install      # first time only
+npm install      # first time only — frontend deps
+npm run setup    # first time only — creates ./venv and installs backend deps
 npm run dev
 ```
 
@@ -27,8 +28,11 @@ Press `Ctrl+C` to stop both.
 - Backend (Flask): <http://127.0.0.1:5055>
 - Frontend (Vite/React): <http://127.0.0.1:5174>
 
-The launcher (`scripts/dev.mjs`) prefers the `unified-collection-report/venv`
-Python (which already has every dependency), falling back to system `python`.
+The app is **self-contained**: the EOD engine is vendored at `backend/engine/`,
+and `npm run setup` creates this project's **own** Python venv (`./venv`) with
+everything in `backend/requirements.txt`. The launcher (`scripts/dev.mjs`) uses
+that local venv first, then a sibling `unified-collection-report/venv`, then
+system `python` — so no other project is required.
 
 ---
 

@@ -31,16 +31,24 @@ const c = {
   red: (s) => `\x1b[31m${s}\x1b[0m`,
 };
 
-/** Resolve the best Python interpreter: prefer the source project's venv
- *  (guaranteed to have every heavy dep incl. Playwright), else system python. */
+/** Resolve the best Python interpreter. Preference order:
+ *    1. $PYTHON override
+ *    2. THIS project's own venv  (self-contained — created by `npm run setup`)
+ *    3. a sibling unified-collection-report venv (legacy fallback)
+ *    4. system python
+ *  So once `nlpl_status/venv` exists, the app no longer needs any other project. */
 function resolvePython() {
   if (process.env.PYTHON) return process.env.PYTHON;
+  const venvPy = (dir, name = "venv") =>
+    IS_WIN ? join(dir, name, "Scripts", "python.exe") : join(dir, name, "bin", "python");
   const unified = process.env.UNIFIED_COLLECTION_DIR
     ? resolve(process.env.UNIFIED_COLLECTION_DIR)
     : resolve(ROOT, "..", "unified-collection-report");
-  const candidates = IS_WIN
-    ? [join(unified, "venv", "Scripts", "python.exe")]
-    : [join(unified, "venv", "bin", "python")];
+  const candidates = [
+    venvPy(ROOT),          // own venv (preferred — self-contained)
+    venvPy(ROOT, ".venv"),
+    venvPy(unified),       // fallback: sibling unified-collection-report venv
+  ];
   for (const p of candidates) if (existsSync(p)) return p;
   return IS_WIN ? "python" : "python3";
 }
