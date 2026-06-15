@@ -177,28 +177,69 @@ def ping():
     }), 200
 
 
+# ── Input helpers (support both "sync the latest generated report" and "upload
+#    a custom file") ─────────────────────────────────────────────────────────
+def _param(name):
+    """Read a field from the multipart form (file-upload requests) or JSON body."""
+    if request.form and name in request.form:
+        return (request.form.get(name) or '').strip()
+    data = request.get_json(silent=True) or {}
+    return str(data.get(name) or '').strip()
+
+
+def _uploaded_file():
+    """If the request carries an uploaded 'file', save it to a temp path and return
+    (path, True). Otherwise (None, False). The caller deletes the temp path when the
+    second value is True. Raises ValueError for a non-Excel upload."""
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return None, False
+    if not f.filename.lower().endswith(('.xlsx', '.xls')):
+        raise ValueError('Expected an Excel (.xlsx) file')
+    import tempfile
+    suffix = os.path.splitext(f.filename)[1] or '.xlsx'
+    fd, tmp = tempfile.mkstemp(prefix='gwm_upload_', suffix=suffix)
+    os.close(fd)
+    f.save(tmp)
+    return tmp, True
+
+
+def _cleanup(path, is_temp):
+    if is_temp and path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 @growwithme_bp.route('/sync-daily', methods=['POST'])
 def sync_daily():
-    """Push the latest EOD Employee Report into GrowwithmeDB (collection grain 2).
+    """Push an EOD Employee Report into GrowwithmeDB (collection grain 2).
 
-    JSON body: {"date": "YYYY-MM-DD"}. One POST /api/collection/sync per employee
-    row (the Node endpoint inserts a single employee-period at a time).
+    Body: {"date": "YYYY-MM-DD"} as JSON, or multipart form with the same `date`
+    field plus an optional `file` (an Employee Report .xlsx). With a file, that
+    file is parsed; without one, the latest generated report is used.
     NOTE: insert-only — re-running for the same date appends new rows.
     """
-    data = request.get_json(silent=True) or {}
-    date = (data.get('date') or '').strip()
+    date = _param('date')
     if not date:
         return jsonify({'success': False, 'message': 'date is required (YYYY-MM-DD)'}), 400
 
-    path = _employee_report_path()
+    try:
+        up, is_temp = _uploaded_file()
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    path = up or _employee_report_path()
     if not path:
         return jsonify({'success': False,
-                        'message': 'No EOD Employee Report found. Run EOD processing first.'}), 404
+                        'message': 'No EOD Employee Report found. Run EOD processing first, or upload one.'}), 404
     try:
         rows = _parse_report(path)
     except Exception as e:
         logger.warning(f'GrowwithmeDB daily sync: report parse failed: {e}')
         return jsonify({'success': False, 'message': f'Report parse failed: {e}'}), 500
+    finally:
+        _cleanup(up, is_temp)
     if not rows:
         return jsonify({'success': False, 'message': 'No employee rows found in report.'}), 400
 
@@ -214,25 +255,30 @@ def sync_daily():
 def sync_hourly():
     """Push the latest Quick Report into GrowwithmeDB (collection grain 1).
 
-    JSON body (optional): {"date": "YYYY-MM-DD", "period_hour": <0-23>}.
-    The Quick Report is an intra-day snapshot with no hour column, so the hour
-    defaults to the current local hour (overridable). One POST /api/hourly/sync
-    per employee row.
+    Body (JSON or multipart): optional `date` (YYYY-MM-DD) + `period_hour` (0-23),
+    plus an optional `file` (a Quick Report .xlsx). With a file, that file is
+    parsed; without one, the latest generated Quick Report is used. The Quick
+    Report has no hour column, so the hour defaults to the current local hour.
     """
-    data = request.get_json(silent=True) or {}
-    date = (data.get('date') or '').strip() or datetime.now().strftime('%Y-%m-%d')
-    raw_hour = data.get('period_hour')
-    period_hour = int(raw_hour) if raw_hour is not None else datetime.now().hour
+    date = _param('date') or datetime.now().strftime('%Y-%m-%d')
+    raw_hour = _param('period_hour')
+    period_hour = int(raw_hour) if raw_hour else datetime.now().hour
 
-    path = _quick_report_path()
+    try:
+        up, is_temp = _uploaded_file()
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    path = up or _quick_report_path()
     if not path:
         return jsonify({'success': False,
-                        'message': 'No Quick Report found. Run Quick Hourly processing first.'}), 404
+                        'message': 'No Quick Report found. Run Quick Hourly processing first, or upload one.'}), 404
     try:
         rows = _parse_quick_report(path)
     except Exception as e:
         logger.warning(f'GrowwithmeDB hourly sync: report parse failed: {e}')
         return jsonify({'success': False, 'message': f'Quick Report parse failed: {e}'}), 500
+    finally:
+        _cleanup(up, is_temp)
     if not rows:
         return jsonify({'success': False, 'message': 'No employee rows found in Quick Report.'}), 400
 
@@ -347,24 +393,33 @@ def _resolve_period_month(data):
 def sync_portfolio():
     """Push the Month-End report's POS sheet into GrowwithmeDB.portfolio_* (monthly).
 
-    JSON body: {"period_month":"YYYY-MM-01"}  (or {"month":"MAR","year":2026}).
+    Body (JSON or multipart): {"period_month":"YYYY-MM-01"} (or month+year), plus
+    an optional `file` (a Month-End report .xlsx with a POS sheet). With a file,
+    that file is parsed; without one, the latest generated Month-End report is used.
     Whole-month override — re-running for the same month replaces it.
     """
-    data = request.get_json(silent=True) or {}
-    period_month = _resolve_period_month(data)
+    period_month = _resolve_period_month({
+        'period_month': _param('period_month'), 'month': _param('month'), 'year': _param('year'),
+    })
     if not period_month:
         return jsonify({'success': False,
                         'message': 'period_month required (YYYY-MM-01), or month+year (e.g. "MAR" + 2026).'}), 400
 
-    path = _month_end_report_path()
+    try:
+        up, is_temp = _uploaded_file()
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    path = up or _month_end_report_path()
     if not path:
         return jsonify({'success': False,
-                        'message': 'No Month-End Employee Report found. Generate one first.'}), 404
+                        'message': 'No Month-End Employee Report found. Generate one first, or upload one.'}), 404
     try:
         rows = _parse_pos_sheet(path)
     except Exception as e:
         logger.warning(f'GrowwithmeDB portfolio sync: POS parse failed: {e}')
         return jsonify({'success': False, 'message': f'POS parse failed: {e}'}), 500
+    finally:
+        _cleanup(up, is_temp)
     if not rows:
         return jsonify({'success': False, 'message': 'No POS rows found in the report.'}), 400
 

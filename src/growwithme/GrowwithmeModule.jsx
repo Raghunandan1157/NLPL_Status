@@ -24,12 +24,13 @@ function thisMonth() {
 function DailyTab() {
   const toast = useToast();
   const [date, setDate] = useState(todayIso());
+  const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
 
   async function sync() {
     setBusy(true);
     try {
-      const r = await syncDaily(date);
+      const r = await syncDaily(date, file);
       if (r.success) toast.success(r.message || "Synced.", "Daily synced to local DB");
       else toast.error(r.message, "Sync failed");
     } catch (e) {
@@ -45,8 +46,11 @@ function DailyTab() {
         <div>
           <p className="eyebrow">EOD daily</p>
           <h2>Sync daily to database</h2>
-          <p className="sub">Pushes the latest EOD Employee Report into GrowwithmeDB (collection grain 2). Whole-date override.</p>
+          <p className="sub">Pushes an EOD Employee Report into GrowwithmeDB (collection grain 2). Whole-date override. Uses the latest generated report, or upload your own below.</p>
         </div>
+      </div>
+      <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
+        <FileDrop label="Upload EOD Employee Report (optional)" hint=".xlsx — leave empty to use the latest generated report" accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
       </div>
       <div className="control-grid" style={{ gridTemplateColumns: "1fr auto" }}>
         <label className="field">
@@ -54,7 +58,7 @@ function DailyTab() {
           <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </label>
         <Button variant="success" icon={CloudUpload} loading={busy} onClick={sync} style={{ alignSelf: "end" }}>
-          Sync to database
+          {file ? "Upload & sync" : "Sync latest"}
         </Button>
       </div>
     </div>
@@ -63,12 +67,13 @@ function DailyTab() {
 
 function HourlyTab() {
   const toast = useToast();
+  const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
 
   async function sync() {
     setBusy(true);
     try {
-      const r = await syncHourly(); // backend defaults date + hour to now
+      const r = await syncHourly(undefined, undefined, file); // backend defaults date + hour to now
       if (r.success) toast.success(r.message || "Synced.", "Hourly synced to local DB");
       else toast.error(r.message, "Sync failed");
     } catch (e) {
@@ -84,12 +89,15 @@ function HourlyTab() {
         <div>
           <p className="eyebrow">Quick hourly</p>
           <h2>Sync hourly to database</h2>
-          <p className="sub">Pushes the latest Quick Report into GrowwithmeDB (collection grain 1). Full-snapshot override.</p>
+          <p className="sub">Pushes a Quick Report into GrowwithmeDB (collection grain 1). Full-snapshot override. Uses the latest generated report, or upload your own below.</p>
         </div>
+      </div>
+      <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
+        <FileDrop label="Upload Quick Report (optional)" hint=".xlsx — leave empty to use the latest generated report" accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
       </div>
       <div className="actions">
         <Button variant="success" icon={CloudUpload} className="grow" loading={busy} onClick={sync}>
-          Sync Quick Report to database
+          {file ? "Upload & sync Quick Report" : "Sync latest Quick Report"}
         </Button>
       </div>
     </div>
@@ -149,12 +157,13 @@ function DisbTab() {
 function PortfolioTab() {
   const toast = useToast();
   const [month, setMonth] = useState(thisMonth());
+  const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
 
   async function sync() {
     setBusy(true);
     try {
-      const r = await syncPortfolio(month);
+      const r = await syncPortfolio(month, file);
       if (r.success) toast.success(r.message || "Synced.", "Portfolio synced to local DB");
       else toast.error(r.message, "Sync failed");
     } catch (e) {
@@ -171,10 +180,14 @@ function PortfolioTab() {
           <p className="eyebrow">Portfolio (POS)</p>
           <h2>Sync portfolio to database</h2>
           <p className="sub">
-            Reads the latest Month-End Employee Report's <b>POS</b> sheet (branch + product PrincipalOS) and pushes it
-            into GrowwithmeDB.portfolio_* for the selected month. Whole-month override. Generate a Month-End report first.
+            Reads a Month-End Employee Report's <b>POS</b> sheet (branch + product PrincipalOS) and pushes it into
+            GrowwithmeDB.portfolio_* for the selected month. Whole-month override. Uses the latest generated report, or
+            upload your own below.
           </p>
         </div>
+      </div>
+      <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
+        <FileDrop label="Upload Month-End report (optional)" hint=".xlsx with a POS sheet — leave empty to use the latest generated report" accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
       </div>
       <div className="control-grid" style={{ gridTemplateColumns: "1fr auto" }}>
         <label className="field">
@@ -182,7 +195,7 @@ function PortfolioTab() {
           <input className="input" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
         </label>
         <Button variant="success" icon={CloudUpload} loading={busy} onClick={sync} style={{ alignSelf: "end" }}>
-          Sync to database
+          {file ? "Upload & sync" : "Sync latest"}
         </Button>
       </div>
     </div>
