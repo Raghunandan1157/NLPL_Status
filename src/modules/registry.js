@@ -8,7 +8,7 @@ import OdReportModule from "../od_report/OdReportModule.jsx";
 import DisbursementModule from "../disbursement/DisbursementModule.jsx";
 import InstantModule from "../instant/InstantModule.jsx";
 import DisbEc2Module from "../disbursement_ec2/DisbEc2Module.jsx";
-import SupabaseModule from "../supabase/SupabaseModule.jsx";
+import GrowwithmeModule from "../growwithme/GrowwithmeModule.jsx";
 import AnalyticsModule from "../analytics/AnalyticsModule.jsx";
 import EmployeeModule from "../employee/EmployeeModule.jsx";
 
@@ -117,15 +117,15 @@ export const MODULES = [
     features: ["CSV/XLSX parsing", "Per-date preview", "Override-by-date", "EC2 Postgres push"],
   },
   {
-    id: "supabase_sync",
-    name: "Supabase Sync",
-    tagline: "Grow_With_Me staging",
+    id: "growwithme_sync",
+    name: "Local DB Sync",
+    tagline: "GrowwithmeDB (MySQL)",
     description:
-      "Mirror EOD daily, Quick hourly and disbursement data into the Supabase Grow_With_Me staging tables.",
+      "Push EOD daily, Quick hourly and disbursement data into the local MySQL GrowwithmeDB via the Phase-2 API, with delete-then-insert override.",
     icon: Database,
     accent: "emerald",
     status: "live",
-    Component: SupabaseModule,
+    Component: GrowwithmeModule,
     features: ["Daily sync", "Hourly sync", "Disbursement sync", "Override semantics"],
   },
   {

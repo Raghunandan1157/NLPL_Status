@@ -19,7 +19,7 @@ from blueprints.od_report import od_report_bp  # noqa: E402  (migrated: OD Repor
 from blueprints.db import db_bp  # noqa: E402  (migrated: Disbursement Report)
 from blueprints.instant import instant_bp  # noqa: E402  (migrated: Instant Report)
 from blueprints.disbursement import disbursement_bp  # noqa: E402  (migrated: Disbursement EC2 sync)
-from blueprints.supabase_sync import supabase_bp  # noqa: E402  (migrated: Supabase sync)
+from blueprints.growwithme_sync import growwithme_bp  # noqa: E402  (Phase 2: GrowwithmeDB sync — AWS EC2)
 from blueprints.analytics import analytics_bp  # noqa: E402  (migrated: Analytics)
 from blueprints.employee import employee_bp  # noqa: E402  (migrated: Employee Performance)
 from blueprints.emp_login import emp_login_bp  # noqa: E402  (migrated: Employee login)
@@ -94,12 +94,6 @@ MODULES = [
         "description": "Aggregate an ESAF disbursement export by date/branch/officer/product and push it to the Coll_Db EC2 Postgres database.",
         "status": "live",
     },
-    {
-        "id": "supabase_sync",
-        "name": "Supabase Sync",
-        "description": "Mirror the EOD daily, Quick hourly and disbursement data into the Supabase Grow_With_Me staging tables.",
-        "status": "live",
-    },
 ]
 
 
@@ -121,7 +115,7 @@ def create_app() -> Flask:
     app.register_blueprint(db_bp, url_prefix="/db")
     app.register_blueprint(instant_bp, url_prefix="/instant")
     app.register_blueprint(disbursement_bp, url_prefix="/disbursement")
-    app.register_blueprint(supabase_bp, url_prefix="/supabase")
+    app.register_blueprint(growwithme_bp, url_prefix="/growwithme")  # Phase 2: GrowwithmeDB sync (AWS EC2)
     app.register_blueprint(analytics_bp, url_prefix="/analytics")  # migrated: Analytics
     app.register_blueprint(employee_bp, url_prefix="/employee")  # migrated: Employee Performance
     app.register_blueprint(emp_login_bp, url_prefix="/emp-login")  # migrated: Employee login
