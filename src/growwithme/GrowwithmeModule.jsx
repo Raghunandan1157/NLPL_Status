@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { CalendarDays, CloudUpload, Database, PieChart, Plug, RefreshCw, Workflow } from "lucide-react";
+import { CalendarDays, CloudUpload, Database, PieChart, Plug, RefreshCw, Users, Workflow } from "lucide-react";
 import { Button, FileDrop, useToast } from "../components/ui.jsx";
-import { ping, syncDaily, syncDisbursement, syncHourly, syncPortfolio } from "./growwithmeApi.js";
+import { ping, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
 import "../eod/eod.css";
 
 const TABS = [
@@ -9,6 +9,7 @@ const TABS = [
   { id: "hourly", label: "Hourly", icon: Workflow },
   { id: "disbursement", label: "Disbursement", icon: CloudUpload },
   { id: "portfolio", label: "Portfolio", icon: PieChart },
+  { id: "staff", label: "Staff", icon: Users },
 ];
 
 function todayIso() {
@@ -202,6 +203,60 @@ function PortfolioTab() {
   );
 }
 
+function StaffTab() {
+  const toast = useToast();
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function sync() {
+    if (!file) {
+      toast.warn("Upload a staff master file first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await syncStaff(file);
+      if (r.success) toast.success(r.message || "Synced.", "Staff details synced to local DB");
+      else toast.error(r.message, "Sync failed");
+    } catch (e) {
+      toast.error(e.message, "Sync failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Staff master</p>
+          <h2>Sync staff details to database</h2>
+          <p className="sub">
+            Reads a staff master's <b>Working</b> sheet and refreshes each employee's name, phone, joining date, DOB
+            and reporting manager in GrowwithmeDB. <b>Details-only</b> — never changes branch/role/hierarchy. Upsert
+            (never deletes); re-running is safe.
+          </p>
+        </div>
+      </div>
+      <div className="file-grid" style={{ gridTemplateColumns: "1fr" }}>
+        <FileDrop
+          label="Staff master (Working sheet)"
+          hint=".xlsx — columns like NMEmpId, Name, PersonalMobile, Date of Joining, ReportingOfficerEMPID"
+          accept=".xlsx,.xls"
+          file={file}
+          onFile={setFile}
+          disabled={busy}
+        />
+      </div>
+      <div className="actions">
+        <Button variant="success" icon={CloudUpload} className="grow" disabled={!file} loading={busy} onClick={sync}>
+          Sync staff details
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function GrowwithmeModule() {
   const toast = useToast();
   const [tab, setTab] = useState("daily");
@@ -255,6 +310,7 @@ export default function GrowwithmeModule() {
       {tab === "hourly" && <HourlyTab />}
       {tab === "disbursement" && <DisbTab />}
       {tab === "portfolio" && <PortfolioTab />}
+      {tab === "staff" && <StaffTab />}
     </div>
   );
 }

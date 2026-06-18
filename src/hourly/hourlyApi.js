@@ -100,11 +100,15 @@ export async function processHourly({ files, options }) {
   else if (plain) filename = plain[1];
   if (!filename) {
     // Backend normally provides the name via Content-Disposition; this is only a
-    // safety fallback. Mirror the backend rule: "Hourly Report - {time}.xlsx".
+    // safety fallback. Mirror the backend rule:
+    // "Hourly Report as on {date} {time}.xlsx".
     const t = (options.hour && options.minute && options.ampm)
       ? `${options.hour}-${String(options.minute).padStart(2, "0")} ${options.ampm}`
       : "";
-    filename = t ? `Hourly Report - ${t}.xlsx` : "Hourly Report.xlsx";
+    const d = options.date || "";
+    filename = t
+      ? `Hourly Report as on ${d ? `${d} ` : ""}${t}.xlsx`
+      : "Hourly Report.xlsx";
   }
 
   // No auto-download: we only needed the headers. Discard the body so the

@@ -40,7 +40,7 @@ _ARCHIVE_DIR = {
 _FILES = {
     "eod": {
         "output": ("EOD_Output_Latest.xlsx", "Regular Demand vs Collection.xlsx", "Regular Demand vs Collection Report"),
-        "report": ("EOD_Report_Latest.xlsx", "EOD Report.xlsx", "EOD Report"),
+        "report": ("EOD_Report_Latest.xlsx", "Daily Collection Report.xlsx", "Daily Collection Report"),
     },
     # Only the generated Hourly Fast Report is surfaced in Reports & Downloads
     # (named "Hourly Report"). The detailed Hourly Collection Report stays as a
@@ -102,6 +102,36 @@ def _safe_token(tok: str) -> bool:
     return bool(tok) and ".." not in tok and "/" not in tok and "\\" not in tok
 
 
+def _present_date(date_part: str) -> str:
+    """Render a YYYY-MM-DD date as dd-mm-yyyy for filenames, matching the
+    'as on DD-MM-YYYY' text printed inside the reports."""
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", (date_part or "").strip())
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else (date_part or "").strip()
+
+
+def _safe_name_part(s: str) -> str:
+    """Strip characters that are illegal in filenames; map ':' -> '-' so a time
+    like '9:30 AM' becomes a valid '9-30 AM'."""
+    s = (s or "").replace(":", "-")
+    return "".join(c for c in s if c not in '\\/*?:"<>|').strip()
+
+
+def _archived_name(module: str, type_: str, default_nice: str,
+                   date_part: str, time_label: str) -> str:
+    """Build the archived/download filename, embedding the report's date (and,
+    for hourly, the time) so the downloaded file is self-describing.
+
+    Falls back to the static friendly name for any report not specially named."""
+    d = _present_date(date_part)
+    if module == "eod" and type_ == "report" and d:
+        return f"Daily Collection Report as on {d}.xlsx"
+    if module == "hourly" and type_ == "output" and d:
+        t = _safe_name_part(time_label)
+        name = f"Hourly Report as on {d} {t}".strip()
+        return f"{name}.xlsx"
+    return default_nice
+
+
 def _newest_mtime(directory: Path) -> float:
     newest = 0.0
     try:
@@ -160,12 +190,15 @@ def snapshot(data_dir, module: str, date_str: str, time_label: str = "") -> dict
 
     reports = {}
     for key, src, nice, label in present:
-        entry = {"label": label, "name": nice, "available": False, "size": None}
+        # Archive under a date/time-stamped name so the downloaded file is
+        # self-describing (e.g. "Daily Collection Report as on 18-06-2026.xlsx").
+        arch_name = _archived_name(module, key, nice, date_part, hour_label)
+        entry = {"label": label, "name": arch_name, "available": False, "size": None}
         if src.exists():
             try:
-                shutil.copy2(src, dest / nice)
+                shutil.copy2(src, dest / arch_name)
                 entry["available"] = True
-                entry["size"] = (dest / nice).stat().st_size
+                entry["size"] = (dest / arch_name).stat().st_size
             except OSError:
                 pass
         reports[key] = entry
@@ -201,7 +234,10 @@ def _read_run(run_dir: Path, module: str) -> dict:
     for key in _order(module):
         _src, nice, label = _FILES[module][key]
         meta_rep = (meta.get("reports") or {}).get(key, {})
-        fp = run_dir / nice
+        # The on-disk file uses the name recorded in meta (it embeds date/time);
+        # fall back to the static friendly name for runs archived before this.
+        arch_name = meta_rep.get("name") or nice
+        fp = run_dir / arch_name
         exists = fp.exists()
         size = None
         if exists:
@@ -212,7 +248,7 @@ def _read_run(run_dir: Path, module: str) -> dict:
         reports.append({
             "type": key,
             "label": meta_rep.get("label", label),
-            "name": nice,
+            "name": arch_name,
             "size": size,
             "available": exists,
         })
@@ -272,6 +308,18 @@ def file_path(data_dir, module, date: str, run_id: str, type_: str):
         return None
     if not _safe_token(run_id):
         return None
-    nice = _FILES[module][type_][1]
-    p = archive_root(data_dir, module) / _norm_date(date) / run_id / nice
+    run_dir = archive_root(data_dir, module) / _norm_date(date) / run_id
+    # Resolve the real archived filename from meta.json (it embeds date/time);
+    # fall back to the static friendly name for older runs.
+    arch_name = _FILES[module][type_][1]
+    mp = run_dir / "meta.json"
+    if mp.exists():
+        try:
+            meta = json.loads(mp.read_text(encoding="utf-8"))
+            nm = (meta.get("reports") or {}).get(type_, {}).get("name")
+            if nm:
+                arch_name = nm
+        except (OSError, ValueError):
+            pass
+    p = run_dir / arch_name
     return p if p.exists() else None

@@ -40,6 +40,15 @@ export function syncDisbursement(file, dates) {
   return requestJson("/growwithme/sync-disbursement", { method: "POST", body: fd });
 }
 
+// Pushes an HR/staff master ("Working" sheet) into GrowwithmeDB — refreshes name,
+// phone, joining date, DOB and reporting manager. DETAILS-ONLY (never touches
+// branch/role/hierarchy); upsert, never deletes; re-running is safe. Needs a file.
+export function syncStaff(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return requestJson("/growwithme/sync-staff", { method: "POST", body: fd });
+}
+
 // Pushes the Month-End report's POS sheet into GrowwithmeDB.portfolio_*
 // (branch+product+month). periodMonth = "YYYY-MM". Optional `file` = a custom
 // Month-End report to upload instead of the latest generated one.

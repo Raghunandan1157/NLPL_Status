@@ -150,13 +150,100 @@ def _parse_report(path):
 
 
 def _quick_report_path():
-    """Locate the latest Quick Hourly Report."""
-    p = config.BACKEND_DATA_DIR / 'Quick_Report_Latest.xlsx'
-    return p if p.exists() else None
+    """Locate the latest hourly report to sync — the Hourly module's report or the
+    Quick module's report (same format). Prefer the newest file that actually has a
+    parseable per-employee table ('Employee Data' sheet, else an OverAll officer
+    section); fall back to the newest existing file."""
+    candidates = [
+        config.BACKEND_DATA_DIR / 'Hourly_Report_Latest.xlsx',
+        config.BACKEND_DATA_DIR / 'Hourly_Fast_Report_Latest.xlsx',
+        config.BACKEND_DATA_DIR / 'Quick_Report_Latest.xlsx',
+    ]
+    existing = [p for p in candidates if p.exists()]
+    if not existing:
+        return None
+    existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)  # newest first
+
+    def _parseable(p):
+        try:
+            wb = load_workbook(p, read_only=True)
+            try:
+                if 'Employee Data' in wb.sheetnames:
+                    return True
+                if 'OverAll' in wb.sheetnames:
+                    for row in wb['OverAll'].iter_rows(values_only=True):
+                        if row and row[0] is not None and str(row[0]).strip() == 'EMP ID':
+                            return True
+                return False
+            finally:
+                wb.close()
+        except Exception:
+            return False
+
+    return next((p for p in existing if _parseable(p)), existing[0])
+
+
+def _parse_employee_data_sheet(ws):
+    """Parse the 'Employee Data' sheet of the newer Hourly Report into hourly row
+    dicts (product_type_id = 0) — same shape as _parse_quick_report.
+
+    This report's 'OverAll' is region-wise; the per-employee data lives here in
+    grouped blocks. Column layout (0-indexed): EMP ID = 1; Regular D/C = 7/8;
+    1-30 D/C = 11/12; 31-60 D/C = 15/16; PNPA D/C = 19/20; NPA cases = 27;
+    NPA activation acc/amt = 28/29; closure acc/amt = 30/31. On-date is region-wise
+    in this report (not per-employee), so it is 0 here.
+    """
+    rows = list(ws.iter_rows(values_only=True))
+    hdr_idx, emp_col = -1, 1
+    for r, row in enumerate(rows):
+        if not row:
+            continue
+        for i, c in enumerate(row):
+            if c is not None and str(c).strip().upper() == 'EMP ID':
+                hdr_idx, emp_col = r, i
+                break
+        if hdr_idx >= 0:
+            break
+    if hdr_idx < 0:
+        raise ValueError("Employee Data sheet has no 'EMP ID' header")
+
+    def g(row, i):
+        return _safe_num(row[i]) if i < len(row) else 0
+
+    out = []
+    for row in rows[hdr_idx + 1:]:
+        if not row or len(row) <= emp_col or row[emp_col] is None:
+            continue
+        emp = str(row[emp_col]).strip()
+        if not emp or emp.upper() in ('EMP ID', 'GRAND TOTAL', 'TOTAL'):
+            continue
+        out.append({
+            'emp_id': emp,
+            'product_type_id': _QUICK_HOURLY_PT_ID,
+            'regular_demand': g(row, 7), 'regular_collection': g(row, 8),
+            'demand_1_30': g(row, 11), 'collection_1_30': g(row, 12),
+            'demand_31_60': g(row, 15), 'collection_31_60': g(row, 16),
+            'pnpa_demand': g(row, 19), 'pnpa_collection': g(row, 20),
+            'npa_cases': g(row, 27),
+            'npa_act_acc': g(row, 28), 'npa_act_amt': g(row, 29),
+            'npa_clo_acc': g(row, 30), 'npa_clo_amt': g(row, 31),
+            'on_date_demand': 0, 'on_date_collection': 0,
+            'regular_demand_amt': 0, 'regular_collection_amt': 0,
+            'demand_1_30_amt': 0, 'collection_1_30_amt': 0,
+            'demand_31_60_amt': 0, 'collection_31_60_amt': 0,
+            'pnpa_demand_amt': 0, 'pnpa_collection_amt': 0,
+            'on_date_demand_amt': 0, 'on_date_collection_amt': 0,
+        })
+    return out
 
 
 def _parse_quick_report(path):
-    """Parse the Quick Report into hourly row dicts (product_type_id = 0).
+    """Parse the hourly report into row dicts (product_type_id = 0).
+
+    Supports two layouts:
+      1. Legacy Quick Report — officer section inside the 'OverAll' sheet.
+      2. Newer Hourly Report — per-employee data in an 'Employee Data' sheet
+         (its 'OverAll' is region-wise).
 
     Mirrors the Coll_Db /api/upload-hourly Quick Report parser:
       - OverAll sheet Branch+Officer section (starts 4 rows after 'EMP ID')
@@ -168,8 +255,15 @@ def _parse_quick_report(path):
     """
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
+        # Prefer the authoritative per-employee 'Employee Data' sheet (newer Hourly
+        # Report — clean grouped columns, one row per officer). The legacy Quick
+        # Report has no such sheet and falls through to the OverAll officer section.
+        # (The Hourly Report's OverAll officer section is a partial/region breakdown
+        # with different totals, so it must NOT be used when Employee Data exists.)
+        if 'Employee Data' in wb.sheetnames:
+            return _parse_employee_data_sheet(wb['Employee Data'])
         if 'OverAll' not in wb.sheetnames:
-            raise ValueError("OverAll sheet not found in Quick Report")
+            raise ValueError("Unsupported hourly file: no 'Employee Data' or 'OverAll' sheet.")
         over_rows = list(wb['OverAll'].iter_rows(values_only=True))
 
         officer_start = -1
@@ -178,7 +272,13 @@ def _parse_quick_report(path):
                 officer_start = r
                 break
         if officer_start < 0:
-            raise ValueError("Could not find Branch+Officer section (no EMP ID header)")
+            # Newer Hourly Report: 'OverAll' is region-wise; per-employee data is in
+            # a separate 'Employee Data' sheet. Parse that instead.
+            if 'Employee Data' in wb.sheetnames:
+                return _parse_employee_data_sheet(wb['Employee Data'])
+            raise ValueError(
+                "Unsupported hourly file: 'OverAll' has no 'EMP ID' officer section "
+                "and there is no 'Employee Data' sheet.")
         data_start = officer_start + 4
 
         # On-Date sheet → {emp_id: {demand, collection}}

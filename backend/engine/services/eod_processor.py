@@ -687,49 +687,16 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
     # Total portfolio demand amount (unfiltered - used in Branch+Officer section)
     w['reg_demand_total_amt'] = reg_demand
 
-    # ---- FY current-month bucket metrics ----
-    # The FY (Financial-Year) sheets cover newly-disbursed loans, which have no
-    # prior-month delinquency history — so the normal last-month bucket masks
-    # (is_last_130 etc.) are always empty for them. For FY scope we therefore
-    # recompute the 1-30 / 31-60 / PNPA / NPA buckets on the CURRENT month
-    # (DPD Group + CurrentLoan Status) so the sheet shows real movement.
-    # These columns are aggregated only for scope == 'FY' (see _metric_cols_fy);
-    # the OverAll/OA sheets keep the last-month basis unchanged.
-    cur_status = _text_col('CurrentLoan Status')
-    is_cur_active = cur_status == 'Active Loan'
-    is_cur_npa = cur_status == 'NPA'
-    is_cur_6190 = dpd.str.contains('61-90', case=False, na=False)
-    dpd_cur_not_0 = dpd_not_blank & (dpd != '0 Days')
-
-    cur_mask_130 = is_130_group & is_cur_active
-    cur_mask_3160 = is_3160_group & is_cur_active
-    cur_mask_pnpa = is_cur_6190 if _is_month_end else (is_cur_6190 & is_cur_active)
-    cur_mask_npa = is_cur_npa & dpd_cur_not_0
-
-    w['dem_130_fy'] = np.where(cur_mask_130, 1, 0)
-    w['col_130_fy'] = np.where(cur_mask_130 & is_inst_full, 1, 0)
-    w['dem_3160_fy'] = np.where(cur_mask_3160, 1, 0)
-    w['col_3160_fy'] = np.where(cur_mask_3160 & is_inst_full, 1, 0)
-    w['pnpa_demand_fy'] = np.where(cur_mask_pnpa, 1, 0)
-    w['pnpa_collection_fy'] = np.where(cur_mask_pnpa & is_inst_full, 1, 0)
-    # HOURLY collection on the current-month basis — without these the hourly FY
-    # sheet shows 0 bucket collection (the last-month hourly_* columns are empty
-    # for newly-disbursed FY loans). Mirrors hourly_col_130 = mask & Full Collected.
-    w['hourly_col_130_fy'] = np.where(cur_mask_130 & is_remark2_full & has_collection, 1, 0)
-    w['hourly_col_3160_fy'] = np.where(cur_mask_3160 & is_remark2_full & has_collection, 1, 0)
-    w['hourly_pnpa_collection_fy'] = np.where(cur_mask_pnpa & is_remark2_full & has_collection, 1, 0)
-    w['npa_cases_fy'] = np.where(cur_mask_npa, 1, 0)
-    w['npa_act_acc_fy'] = np.where(cur_mask_npa & dpd_not_blank & has_collection, 1, 0)
-    w['npa_act_amt_fy'] = np.where(cur_mask_npa & dpd_not_blank & has_collection, collection, 0)
-    w['npa_clo_acc_fy'] = np.where(cur_mask_npa & dpd_is_blank & has_collection, 1, 0)
-    w['npa_clo_amt_fy'] = np.where(cur_mask_npa & dpd_is_blank, collection, 0)
-    # amount versions (FTOD on demand, mirroring the last-month amount metrics)
-    w['dem_130_amt_fy'] = np.where(ftod_mask & cur_mask_130, cumulative_demand, 0)
-    w['col_130_amt_fy'] = np.where(cur_mask_130 & is_inst_full, collection, 0)
-    w['dem_3160_amt_fy'] = np.where(ftod_mask & cur_mask_3160, cumulative_demand, 0)
-    w['col_3160_amt_fy'] = np.where(cur_mask_3160 & is_inst_full, collection, 0)
-    w['pnpa_demand_amt_fy'] = np.where(ftod_mask & cur_mask_pnpa, cumulative_demand, 0)
-    w['pnpa_collection_amt_fy'] = np.where(cur_mask_pnpa & is_inst_full, collection, 0)
+    # ---- FY delinquency buckets use the SAME last-month basis as every other sheet ----
+    # The FY (Financial-Year) sheets previously recomputed the 1-30 / 31-60 / PNPA
+    # / NPA buckets on the CURRENT month. That mixed two different metrics in one
+    # report — every other sheet measures recovery of LAST month's delinquent
+    # stock — and produced demand with no matchable collection for newly-disbursed
+    # loans (inflating balances and distorting collection %). FY scope now reuses
+    # the standard last-month metric columns, so newly-disbursed loans with no
+    # prior-month delinquency correctly show empty 1-30 / 1-90 buckets. FY scope
+    # still filters to current-FY loans (Loan Date == 1); only the bucket BASIS is
+    # unified with the rest of the report.
 
     # Define the metric columns to aggregate
     # Count-based metrics (cols 6-21 in VBA's _precomp reader)
@@ -754,24 +721,6 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
         'reg_demand_total_amt',
     ]
     metric_cols = count_metric_cols + amount_metric_cols
-
-    # For FY scope, swap the delinquency-bucket metrics to their current-month
-    # (_fy) counterparts. Same column order, so the aggregated frame is renamed
-    # back to the standard names — the report builder is unchanged.
-    _fy_bucket_swap = {
-        'dem_130': 'dem_130_fy', 'col_130': 'col_130_fy',
-        'dem_3160': 'dem_3160_fy', 'col_3160': 'col_3160_fy',
-        'pnpa_demand': 'pnpa_demand_fy', 'pnpa_collection': 'pnpa_collection_fy',
-        'hourly_col_130': 'hourly_col_130_fy', 'hourly_col_3160': 'hourly_col_3160_fy',
-        'hourly_pnpa_collection': 'hourly_pnpa_collection_fy',
-        'npa_cases': 'npa_cases_fy',
-        'npa_act_acc': 'npa_act_acc_fy', 'npa_act_amt': 'npa_act_amt_fy',
-        'npa_clo_acc': 'npa_clo_acc_fy', 'npa_clo_amt': 'npa_clo_amt_fy',
-        'dem_130_amt': 'dem_130_amt_fy', 'col_130_amt': 'col_130_amt_fy',
-        'dem_3160_amt': 'dem_3160_amt_fy', 'col_3160_amt': 'col_3160_amt_fy',
-        'pnpa_demand_amt': 'pnpa_demand_amt_fy', 'pnpa_collection_amt': 'pnpa_collection_amt_fy',
-    }
-    _metric_cols_fy = [_fy_bucket_swap.get(c, c) for c in metric_cols]
 
     # Pre-compute the 8 (scope × product) subsets once — reused across all 12 filter_types
     _scope_base = {
@@ -834,17 +783,13 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
                 if len(subset) == 0:
                     continue
 
-                # Group by filter_col + group_col, sum metrics. FY scope uses the
-                # current-month bucket columns, then renames them back to the
-                # standard metric names so downstream code is unchanged.
-                agg_cols = _metric_cols_fy if scope == 'FY' else metric_cols
-                grouped = subset.groupby([filter_col, group_col])[agg_cols].sum()
+                # Group by filter_col + group_col, sum metrics. Both OA and FY
+                # scopes use the same last-month-basis metric columns; FY differs
+                # only in its row subset (current-FY loans), not the bucket basis.
+                grouped = subset.groupby([filter_col, group_col])[metric_cols].sum()
 
                 if len(grouped) == 0:
                     continue
-
-                if scope == 'FY':
-                    grouped.columns = metric_cols
 
                 grouped = grouped.reset_index()
 

@@ -3,6 +3,7 @@ import {
   Archive,
   CalendarDays,
   CheckCircle2,
+  Database,
   Download,
   FileCheck2,
   FileSpreadsheet,
@@ -12,6 +13,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Button, FileDrop, useToast, Modal } from "../components/ui.jsx";
+import { syncHourly } from "../growwithme/growwithmeApi.js";
 import {
   saveBackendFile,
   cacheEodOutput,
@@ -275,6 +277,20 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
     }
   }
 
+  // Push the latest hourly report's per-employee data into GrowwithmeDB (AWS).
+  async function handleSyncDb() {
+    setBusy("sync-db");
+    try {
+      const res = await syncHourly(); // no file → backend uses the latest hourly report
+      if (res.success) toast.success(res.message || "Hourly data synced to database.", "Synced to database");
+      else toast.error(res.message, "Sync failed");
+    } catch (e) {
+      toast.error(e.message, "Sync failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function handleFastReport() {
     setBusy("fast-report");
     try {
@@ -476,6 +492,20 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
               style={{ flex: 1 }}
             >
               Fast Report
+            </Button>
+          </div>
+
+          {/* Push the generated hourly report straight into GrowwithmeDB (AWS). */}
+          <div className="actions" style={{ marginTop: 10 }}>
+            <Button
+              variant="outline"
+              icon={Database}
+              className="grow"
+              disabled={Boolean(busy) || job.busy}
+              loading={busy === "sync-db"}
+              onClick={handleSyncDb}
+            >
+              Sync hourly to database
             </Button>
           </div>
         </div>

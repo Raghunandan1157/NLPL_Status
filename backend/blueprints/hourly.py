@@ -871,6 +871,26 @@ def process():
                 fast_report_ready = fast_report_path.exists()
                 logger.info(f"Fast hourly report generated: {fast_report_path.name}")
 
+                # Zero-collection ext tables (right side, aligned per designation
+                # section). Non-fatal — never block report generation.
+                try:
+                    from services.zero_collection_ext import (
+                        append_zero_collection_tables,
+                        build_branch_region_map,
+                    )
+                    branch_region = build_branch_region_map(eod_df)
+                    append_zero_collection_tables(
+                        fast_report_path,
+                        precomp['_precomp'],
+                        h_target_date,
+                        branch_region=branch_region,
+                        selected_date_str=selected_date,
+                        selected_time_str=selected_time,
+                    )
+                    logger.info("Zero-collection ext tables appended")
+                except Exception as ext_err:
+                    logger.warning(f"Zero-collection ext skipped: {ext_err}")
+
             # Save the precomp-ready data as parquet for /generate-fast-report
             try:
                 fast_cache_path = config.DB_CACHE_DIR / 'hourly_fast_cache.parquet'
@@ -912,11 +932,12 @@ def process():
                 'suggestion': 'Ensure the EOD Output has the required Region/Division/officer and demand columns, then retry.',
             }), 500
 
-        # Filename rule: "Hourly Report - {selected_time}.xlsx" with ':' -> '-'
+        # Filename rule: "Hourly Report as on {date} {time}.xlsx" with ':' -> '-'
         # and any invalid filename characters stripped.
         safe_time = selected_time.replace(':', '-')
         safe_time = ''.join(c for c in safe_time if c not in '\\/*?:"<>|').strip()
-        download_filename = f"Hourly Report - {safe_time}.xlsx"
+        safe_date = ''.join(c for c in str(selected_date) if c not in '\\/*?:"<>|').strip()
+        download_filename = f"Hourly Report as on {safe_date} {safe_time}.xlsx"
 
         response = send_file(
             str(fast_report_path),
@@ -1119,6 +1140,26 @@ def generate_fast_report():
         build_daily_report(precomp['_precomp'], report_path, target_date, has_officer,
                            formatted_dt=h_fmt, hourly_mode=True)
         logger.info(f"HOURLY FAST REPORT: Generated -> {report_path.name}")
+
+        # Zero-collection ext tables (right side, aligned per designation section).
+        # Non-fatal — never block report generation.
+        try:
+            from services.zero_collection_ext import (
+                append_zero_collection_tables,
+                build_branch_region_map,
+            )
+            branch_region = build_branch_region_map(df)
+            append_zero_collection_tables(
+                report_path,
+                precomp['_precomp'],
+                target_date,
+                branch_region=branch_region,
+                selected_date_str=target_date.strftime('%d-%m-%Y'),
+                selected_time_str=gen_time,
+            )
+            logger.info("HOURLY FAST REPORT: Zero-collection ext tables appended")
+        except Exception as ext_err:
+            logger.warning(f"HOURLY FAST REPORT: Zero-collection ext skipped: {ext_err}")
 
         return jsonify({
             'success': True,

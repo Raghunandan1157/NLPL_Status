@@ -278,7 +278,20 @@ def create_app() -> Flask:
     @app.post("/api/eod/snapshot-reports")
     def snapshot_reports():
         data = request.get_json(silent=True) or {}
-        return jsonify(reports_archive.snapshot(engine_config.DATA_DIR, data.get("date", "")))
+        date = data.get("date", "")
+        # Prefer the report's OWN date (the "as on" date persisted at processing
+        # time) so the archived filename matches the date printed inside the
+        # report, not the date the snapshot was taken.
+        try:
+            from pathlib import Path as _Path
+            td_file = _Path(engine_config.BACKEND_DATA_DIR) / ".target_date"
+            if td_file.exists():
+                td = td_file.read_text().strip()
+                if td:
+                    date = td
+        except Exception:
+            pass
+        return jsonify(reports_archive.snapshot(engine_config.DATA_DIR, date))
 
     @app.get("/api/eod/report-archive")
     def report_archive():
