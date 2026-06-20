@@ -448,6 +448,14 @@ def upload():
         try:
             logger.info(f"[OD_REPORT] Processing: {original_filename}")
 
+            # Emit an immediate heartbeat BEFORE the (slow) PAR read so the UI
+            # shows activity instead of sitting frozen for the ~30-60s it takes
+            # to read a large PAR workbook — the #1 reason this looked "hung".
+            yield _send_sse({
+                "step": 1, "title": "Read PAR File", "status": "progress",
+                "detail": f"Reading '{original_filename}' (large files can take a minute)…"
+            })
+
             # Kick off the month-end OD read in a background thread now — it is
             # independent of the PAR steps and calamine releases the GIL, so its
             # read overlaps steps 1-3 instead of adding to the total time.
@@ -464,15 +472,44 @@ def upload():
                 od_thread.start()
 
             # --- Step 1: Read PAR file (fast engine) ---
-            xl = open_excel_fast(tmp.name)
-            if "Sheet1" not in xl.sheet_names:
-                err = f"'Sheet1' not found. Available sheets: {', '.join(xl.sheet_names)}"
-                xl.close()
+            # The read is a single blocking calamine call (~30-60s on a large
+            # PAR). Run it on a thread and heartbeat every few seconds so the UI
+            # keeps ticking instead of appearing frozen for the whole read.
+            par_holder = {}
+
+            def _read_par():
+                try:
+                    xlp = open_excel_fast(tmp.name)
+                    if "Sheet1" not in xlp.sheet_names:
+                        par_holder['sheets'] = list(xlp.sheet_names)
+                        xlp.close()
+                        return
+                    dfp = xlp.parse("Sheet1")
+                    xlp.close()
+                    par_holder['df'] = dfp
+                except Exception as exc:
+                    par_holder['err'] = exc
+
+            par_thread = threading.Thread(target=_read_par, daemon=True)
+            par_thread.start()
+            _waited = 0
+            while par_thread.is_alive():
+                par_thread.join(timeout=4)
+                if par_thread.is_alive():
+                    _waited += 4
+                    yield _send_sse({
+                        "step": 1, "title": "Read PAR File", "status": "progress",
+                        "detail": f"Reading '{original_filename}'… ({_waited}s)"
+                    })
+
+            if 'err' in par_holder:
+                raise par_holder['err']
+            if 'sheets' in par_holder:
+                err = f"'Sheet1' not found. Available sheets: {', '.join(par_holder['sheets'])}"
                 os.unlink(tmp.name)
                 yield _send_sse({"error": err})
                 return
-            df = xl.parse("Sheet1")
-            xl.close()
+            df = par_holder['df']
 
             if "DPD Days" not in df.columns:
                 err = f"'DPD Days' column not found. Available columns: {', '.join(str(c) for c in df.columns)}"
@@ -677,6 +714,7 @@ def upload():
                 str(output_path),
                 {'default_date_format': 'yyyy-mm-dd hh:mm:ss', 'constant_memory': False},
             )
+            wb_closed = False
             try:
                 ws_summary = wb.add_worksheet("ESAF OD Report")
                 try:
@@ -692,10 +730,59 @@ def upload():
                 # Object view with NaN/NaT -> None so blanks stay blank; .tolist()
                 # coerces numpy scalars/Timestamps to native types xlsxwriter writes.
                 obj = df_output.astype(object).where(pd.notnull(df_output), None)
+                total_data_rows = len(obj)
+                # Heartbeat before the row-by-row write (~1s per few-thousand rows
+                # on big PARs). Without these the UI froze for the whole write and
+                # looked hung; emit periodic progress so it's visibly alive.
+                yield _send_sse({
+                    "step": 6, "title": "Save Output", "status": "progress",
+                    "detail": f"Writing {total_data_rows:,} rows to Excel…"
+                })
                 for i, row in enumerate(obj.values.tolist(), start=1):
                     ws_data.write_row(i, 0, row)
+                    if i % 25000 == 0:
+                        yield _send_sse({
+                            "step": 6, "title": "Save Output", "status": "progress",
+                            "detail": f"Writing rows {i:,} / {total_data_rows:,}…"
+                        })
+
+                # xlsxwriter does the ENTIRE XML serialization + zip compression
+                # inside wb.close() — for 130k+ rows that's a single ~30-40s
+                # blocking call. Run it on a thread and emit heartbeats so the UI
+                # stays alive instead of freezing (the main reason this looked
+                # "hung"). A flag keeps the finally a no-op once it has closed.
+                yield _send_sse({
+                    "step": 6, "title": "Save Output", "status": "progress",
+                    "detail": "Finalizing workbook (compressing & writing to disk)…"
+                })
+                close_err = {}
+
+                def _close_wb():
+                    try:
+                        wb.close()
+                    except Exception as exc:
+                        close_err['err'] = exc
+
+                close_thread = threading.Thread(target=_close_wb, daemon=True)
+                close_thread.start()
+                _waited = 0
+                while close_thread.is_alive():
+                    close_thread.join(timeout=4)
+                    if close_thread.is_alive():
+                        _waited += 4
+                        yield _send_sse({
+                            "step": 6, "title": "Save Output", "status": "progress",
+                            "detail": f"Finalizing workbook… ({_waited}s)"
+                        })
+                wb_closed = True
+                if 'err' in close_err:
+                    raise close_err['err']
             finally:
-                wb.close()
+                if not wb_closed:
+                    try:
+                        wb.close()
+                    except Exception:
+                        pass
             os.unlink(tmp.name)
 
             yield _send_sse({

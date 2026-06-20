@@ -47,6 +47,40 @@ def _norm_join_key(series):
         .str.replace(r'\.0$', '', regex=True)
     )
 
+
+def _parse_trxdate_mixed(series):
+    """Per-element Trxdate parser for the hourly date filter.
+
+    The Collection report can store Trxdate as a MIX of real datetimes and raw
+    Excel serial numbers (e.g. 46191 == 2026-06-18) in the SAME column. The
+    shared services.eod_processor.parse_date_column decides serial-vs-string by
+    the WHOLE column's dtype, so on a mixed (object) column the serial cells
+    fall into string parsing and become 1970-01-01 — then get dropped by the
+    month-to-date filter, undercounting collection (the daily/EOD numbers stay
+    correct because EOD's DuckDB path converts serials per-row via typeof()).
+
+    This mirrors that per-row logic in pandas: each cell that looks like an
+    Excel serial is converted from the 1899-12-30 epoch; everything else
+    (real datetimes + string dates) is parsed normally. EOD and the shared
+    helper are intentionally left untouched.
+    """
+    # Coerce each cell to a number; real datetimes and date strings yield NaN
+    # here, so only genuine serials survive. Excel serials for recent dates sit
+    # around ~46000 (year 2026); bound to [20000, 80000] (~1954–2119) to avoid
+    # mistaking a stray small integer for a date.
+    as_num = pd.to_numeric(series, errors='coerce')
+    is_serial = as_num.between(20000, 80000)
+
+    result = pd.Series(pd.NaT, index=series.index, dtype='datetime64[ns]')
+    if is_serial.any():
+        excel_epoch = pd.Timestamp('1899-12-30')
+        result[is_serial] = excel_epoch + pd.to_timedelta(as_num[is_serial], unit='D')
+    rest = ~is_serial
+    if rest.any():
+        result[rest] = pd.to_datetime(series[rest], errors='coerce', dayfirst=True)
+    return result
+
+
 HOURLY_STATIC = str(config.STATIC_DIR / 'hourly')
 
 
@@ -628,9 +662,12 @@ def process():
                 selected_date_dt = pd.to_datetime(selected_date, format='%d-%m-%Y')
                 first_of_month = selected_date_dt.replace(day=1)
 
-                # Parse transaction dates (handles Excel serial numbers + string formats)
-                from services.eod_processor import parse_trxdate
-                trxdate_parsed = parse_trxdate(filtered_df[col_trxdate])
+                # Parse transaction dates per-element so a column that MIXES real
+                # datetimes with raw Excel serials (e.g. 46191) is handled
+                # correctly. The shared parse_trxdate decides by whole-column
+                # dtype and mis-parses serial cells in a mixed column to 1970,
+                # which silently drops them from the month-to-date filter.
+                trxdate_parsed = _parse_trxdate_mixed(filtered_df[col_trxdate])
 
                 # Filter: transactions from first of month to selected date (inclusive)
                 mask = (trxdate_parsed >= first_of_month) & (trxdate_parsed <= selected_date_dt)

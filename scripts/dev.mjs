@@ -96,9 +96,22 @@ async function waitFor(url, label, timeoutMs) {
 }
 
 function openBrowser(url) {
-  if (IS_WIN) exec(`start "" "${url}"`, { shell: "cmd.exe" });
-  else if (process.platform === "darwin") exec(`open "${url}"`);
-  else exec(`xdg-open "${url}"`);
+  // Force Google Chrome, falling back to the OS default browser if Chrome
+  // isn't installed/registered (so the launcher still works everywhere).
+  if (IS_WIN) {
+    // `start "" chrome <url>` resolves chrome.exe via the registry App Paths.
+    exec(`start "" chrome "${url}"`, { shell: "cmd.exe" }, (err) => {
+      if (err) exec(`start "" "${url}"`, { shell: "cmd.exe" });
+    });
+  } else if (process.platform === "darwin") {
+    exec(`open -a "Google Chrome" "${url}"`, (err) => {
+      if (err) exec(`open "${url}"`);
+    });
+  } else {
+    exec(`google-chrome "${url}"`, (err) => {
+      if (err) exec(`xdg-open "${url}"`);
+    });
+  }
 }
 
 const children = [];
