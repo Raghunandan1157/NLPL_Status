@@ -13,8 +13,7 @@ for line in open(PWFILE, encoding="utf-8"):
         break
 
 SOURCES = [
-    (r"C:/Users/nlpl it/Downloads/portfolio_month_wise_LIVE_2026-06-19.sql.gz", "imp_pmw_"),
-    (r"C:/Users/nlpl it/Downloads/postgres_LIVE_2026-06-19.sql.gz", "imp_pg_"),
+    (r"C:/Users/nlpl it/Downloads/postgres_LIVE_2026-06-20b.sql.gz", "imp_pg_"),
 ]
 EXCLUDE = {"otp_audit"}  # auth/login — excluded per instruction
 

@@ -7,7 +7,7 @@ import pymysql
 PWFILE = r"C:/Users/nlpl it/Desktop/growwithme-local/database/.env"
 PW = next(l.split('=',1)[1].strip() for l in open(PWFILE, encoding='utf-8') if l.upper().startswith('MYSQL_PASSWORD='))
 
-DATES = ['2026-06-16', '2026-06-17', '2026-06-18']  # the days collection_period is missing
+DATES = ['2026-06-16', '2026-06-17', '2026-06-18', '2026-06-19']  # days collection_period is missing
 GRAIN = 2     # daily
 FY_ID = 3     # FY26-27
 # bucket_id -> (demand_count_col, demand_amt_col, collection_count_col, collection_amt_col)

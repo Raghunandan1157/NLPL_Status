@@ -47,11 +47,11 @@ function DailyTab() {
         <div>
           <p className="eyebrow">EOD daily</p>
           <h2>Sync daily to database</h2>
-          <p className="sub">Pushes an EOD Employee Report into GrowwithmeDB (collection grain 2). Whole-date override. Uses the latest generated report, or upload your own below.</p>
+          <p className="sub">Pushes an EOD Employee Report — or a raw Daily Collection Report (its Employee Data sheet) — into GrowwithmeDB (collection grain 2). Whole-date override. Uses the latest generated report, or upload your own below.</p>
         </div>
       </div>
       <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
-        <FileDrop label="Upload EOD Employee Report (optional)" hint=".xlsx — leave empty to use the latest generated report" accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
+        <FileDrop label="Upload EOD Employee Report or Daily Collection Report (optional)" hint=".xlsx — an EOD Employee Report, or a raw Daily Collection Report. Leave empty to use the latest generated report." accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
       </div>
       <div className="control-grid" style={{ gridTemplateColumns: "1fr auto" }}>
         <label className="field">
@@ -181,14 +181,14 @@ function PortfolioTab() {
           <p className="eyebrow">Portfolio (POS)</p>
           <h2>Sync portfolio to database</h2>
           <p className="sub">
-            Reads a Month-End Employee Report's <b>POS</b> sheet (branch + product PrincipalOS) and pushes it into
-            GrowwithmeDB.portfolio_* for the selected month. Whole-month override. Uses the latest generated report, or
-            upload your own below.
+            Reads a Month-End Employee Report's <b>POS</b> sheet (branch + product PrincipalOS) — or a{" "}
+            <b>raw PAR file</b> (POS is built from PrincipalOS × DPD) — and pushes it into GrowwithmeDB.portfolio_* for
+            the selected month. Whole-month override. Uses the latest generated report, or upload your own below.
           </p>
         </div>
       </div>
       <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
-        <FileDrop label="Upload Month-End report (optional)" hint=".xlsx with a POS sheet — leave empty to use the latest generated report" accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
+        <FileDrop label="Upload Month-End report or raw PAR (optional)" hint=".xlsx — a Month-End report (POS sheet) or a raw PAR. A large PAR can take ~2 min. Leave empty to use the latest generated report." accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
       </div>
       <div className="control-grid" style={{ gridTemplateColumns: "1fr auto" }}>
         <label className="field">

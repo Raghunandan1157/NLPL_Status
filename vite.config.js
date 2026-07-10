@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: "127.0.0.1",
-    port: 5174,
+    port: 5175,
     strictPort: true,
     open: false, // the dev launcher (scripts/dev.mjs) opens the browser once
     watch: {

@@ -11,7 +11,7 @@ cur.execute("SELECT NOW() n"); NOW = cur.fetchone()['n']
 cur.execute("SELECT branch_id, branch_name FROM branch")
 branch_map = {norm(r['branch_name']): r['branch_id'] for r in cur.fetchall()}
 
-DATES = ['2026-06-17', '2026-06-18', '2026-06-19']
+DATES = ['2026-06-17', '2026-06-18', '2026-06-19', '2026-06-20']
 ph = ",".join(["%s"]*len(DATES))
 
 # idempotent: clear prior migration rows for these dates

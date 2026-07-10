@@ -8,6 +8,7 @@ sync was removed. No network/Supabase code here — parsing only.
 """
 
 import logging
+import re
 
 from openpyxl import load_workbook
 
@@ -23,6 +24,9 @@ _DISB_PRODUCT_TYPE_ID = {'IGL': 1, 'FIG': 2, 'IL': 3}
 
 # Quick Report carries no product split — all rows are combined (id 0).
 _QUICK_HOURLY_PT_ID = 0
+
+# Employee code, e.g. NL10838.
+_EMP_CODE_RE = re.compile(r'^[A-Za-z]{1,3}\d{3,}$')
 
 # (db_column, normalised header text) — order defines positional fallback.
 _METRIC_HEADERS = [
@@ -194,24 +198,38 @@ def _parse_employee_data_sheet(ws):
     in this report (not per-employee), so it is 0 here.
     """
     rows = list(ws.iter_rows(values_only=True))
-    hdr_idx, emp_col = -1, 1
+    hdr_idx = -1
     for r, row in enumerate(rows):
-        if not row:
-            continue
-        for i, c in enumerate(row):
-            if c is not None and str(c).strip().upper() == 'EMP ID':
-                hdr_idx, emp_col = r, i
-                break
-        if hdr_idx >= 0:
+        if row and any(c is not None and str(c).strip().upper() == 'EMP ID' for c in row):
+            hdr_idx = r
             break
     if hdr_idx < 0:
         raise ValueError("Employee Data sheet has no 'EMP ID' header")
+
+    # The employee CODE column is detected by content (values like NL10838): in the
+    # raw Daily Collection Report the column headed 'EMP ID' holds the officer NAME
+    # while the code sits under 'EMP Name'.
+    header, data = rows[hdr_idx], rows[hdr_idx + 1:]
+    candidates = [i for i, c in enumerate(header)
+                  if c is not None and 'emp' in str(c).strip().lower()]
+    if not candidates:
+        candidates = list(range(min(4, len(header))))
+
+    def _code_hits(ci):
+        return sum(1 for row in data[:40]
+                   if row and ci < len(row) and row[ci] is not None
+                   and _EMP_CODE_RE.match(str(row[ci]).strip()))
+
+    emp_col = max(candidates, key=_code_hits)
+    if _code_hits(emp_col) == 0:
+        emp_col = next((i for i, c in enumerate(header)
+                        if c is not None and str(c).strip().upper() == 'EMP ID'), candidates[0])
 
     def g(row, i):
         return _safe_num(row[i]) if i < len(row) else 0
 
     out = []
-    for row in rows[hdr_idx + 1:]:
+    for row in data:
         if not row or len(row) <= emp_col or row[emp_col] is None:
             continue
         emp = str(row[emp_col]).strip()

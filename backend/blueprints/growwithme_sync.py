@@ -56,9 +56,11 @@ from blueprints.report_parsers import (
     _parse_quick_report,
     _norm,
     _num,
+    _safe_num,
     _DISB_PRODUCT_TYPE_ID,
 )
 from openpyxl import load_workbook
+import re
 
 logger = logging.getLogger(__name__)
 growwithme_bp = Blueprint('growwithme_sync', __name__)
@@ -218,6 +220,107 @@ def _cleanup(path, is_temp):
             pass
 
 
+# ── Daily Collection Report (raw) → daily collection sync ─────────────────
+# The daily sync normally ingests a generated EOD Employee Report (per-product
+# IGL/FIG/VVY sheets, via _parse_report). A raw "Daily Collection Report" instead
+# carries one combined per-employee row in an 'Employee Data' sheet — same bucket
+# column layout the hourly parser (_parse_employee_data_sheet) already handles, but
+# count-only (no rupee amounts, like the hourly grain) and with the employee CODE
+# in a different column than the label 'EMP ID' (that column can hold a name).
+_EMP_CODE_RE = re.compile(r'^[A-Za-z]{1,3}\d{3,}$')  # e.g. NL10838
+
+
+def _has_employee_data_sheet(path):
+    """True if the workbook has an 'Employee Data' sheet (a raw Daily Collection
+    Report) rather than the per-product EOD Employee Report sheets."""
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            return 'Employee Data' in wb.sheetnames
+        finally:
+            wb.close()
+    except Exception:
+        return False
+
+
+def _parse_daily_collection(path):
+    """Parse a raw Daily Collection Report's 'Employee Data' sheet into the same row
+    dicts _parse_report returns ({emp_id, product_type_id, <25 metrics>}), so it can
+    feed the daily collection sync. Combined across products (product_type_id=None);
+    amounts are 0 (this report is count-only, matching the hourly grain).
+
+    The employee CODE column is detected by content (values like NL10838), because
+    in this report the column literally headed 'EMP ID' can hold the officer NAME
+    while the code sits under 'EMP Name'. Bucket columns match the hourly layout:
+    Regular D/C = 7/8, 1-30 = 11/12, 31-60 = 15/16, PNPA = 19/20, NPA cases = 27,
+    activation acc/amt = 28/29, closure acc/amt = 30/31.
+    """
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb['Employee Data']
+        rows = list(ws.iter_rows(values_only=True))
+        # Header row = the one that contains an 'EMP ID' cell.
+        hdr_idx = -1
+        for r, row in enumerate(rows):
+            if row and any(c is not None and str(c).strip().upper() == 'EMP ID' for c in row):
+                hdr_idx = r
+                break
+        if hdr_idx < 0:
+            raise ValueError("Daily Collection Report 'Employee Data' sheet has no 'EMP ID' header.")
+
+        data = rows[hdr_idx + 1:]
+        # Candidate emp columns: headers mentioning 'emp'. Pick the one whose values
+        # best match the employee-code pattern (NL#####).
+        header = rows[hdr_idx]
+        candidates = [i for i, c in enumerate(header) if c is not None and 'emp' in str(c).strip().lower()]
+        if not candidates:
+            candidates = list(range(min(4, len(header))))
+
+        def _code_hits(ci):
+            hits = 0
+            for row in data[:40]:
+                if row and ci < len(row) and row[ci] is not None and _EMP_CODE_RE.match(str(row[ci]).strip()):
+                    hits += 1
+            return hits
+
+        emp_col = max(candidates, key=_code_hits)
+        if _code_hits(emp_col) == 0:
+            # No code-like column found — fall back to the literal 'EMP ID' column.
+            emp_col = next((i for i, c in enumerate(header)
+                            if c is not None and str(c).strip().upper() == 'EMP ID'), candidates[0])
+
+        def g(row, i):
+            return _safe_num(row[i]) if i < len(row) else 0
+
+        out = []
+        for row in data:
+            if not row or emp_col >= len(row) or row[emp_col] is None:
+                continue
+            emp = str(row[emp_col]).strip()
+            if not emp or emp.upper() in ('EMP ID', 'GRAND TOTAL', 'TOTAL'):
+                continue
+            out.append({
+                'emp_id': emp,
+                'product_type_id': None,  # combined report — no product split
+                'regular_demand': g(row, 7), 'regular_collection': g(row, 8),
+                'demand_1_30': g(row, 11), 'collection_1_30': g(row, 12),
+                'demand_31_60': g(row, 15), 'collection_31_60': g(row, 16),
+                'pnpa_demand': g(row, 19), 'pnpa_collection': g(row, 20),
+                'npa_cases': g(row, 27),
+                'npa_act_acc': g(row, 28), 'npa_act_amt': g(row, 29),
+                'npa_clo_acc': g(row, 30), 'npa_clo_amt': g(row, 31),
+                'on_date_demand': 0, 'on_date_collection': 0,
+                'regular_demand_amt': 0, 'regular_collection_amt': 0,
+                'demand_1_30_amt': 0, 'collection_1_30_amt': 0,
+                'demand_31_60_amt': 0, 'collection_31_60_amt': 0,
+                'pnpa_demand_amt': 0, 'pnpa_collection_amt': 0,
+                'on_date_demand_amt': 0, 'on_date_collection_amt': 0,
+            })
+        return out
+    finally:
+        wb.close()
+
+
 @growwithme_bp.route('/sync-daily', methods=['POST'])
 def sync_daily():
     """Push an EOD Employee Report into GrowwithmeDB (collection grain 2).
@@ -240,7 +343,13 @@ def sync_daily():
         return jsonify({'success': False,
                         'message': 'No EOD Employee Report found. Run EOD processing first, or upload one.'}), 404
     try:
-        rows = _parse_report(path)
+        if _has_employee_data_sheet(path):
+            # Raw Daily Collection Report — parse its combined 'Employee Data' sheet
+            # (count-only, product-combined). Same daily grain, whole-date override.
+            logger.info('GrowwithmeDB daily sync: parsing raw Daily Collection Report (Employee Data sheet).')
+            rows = _parse_daily_collection(path)
+        else:
+            rows = _parse_report(path)
     except Exception as e:
         logger.warning(f'GrowwithmeDB daily sync: report parse failed: {e}')
         return jsonify({'success': False, 'message': f'Report parse failed: {e}'}), 500
@@ -321,6 +430,20 @@ _POS_HEADER_KEY = [
     ('npa_pos', 'npa'),
     ('total_pos', 'total'),
 ]
+
+# Raw-PAR fallback: map the PAR's "DPD Days" bucket text -> growwithme pos key,
+# mirroring the Month-End engine's POS derivation (eod_processor.build_employee_report).
+# Keys are matched lower-cased/stripped. 61-90 = PNPA; everything 91+ = NPA.
+_PAR_DPD_POS = {
+    '0 days': 'regular', '0days': 'regular', '0': 'regular',
+    '1: 1-30': 'sma0', '1-30': 'sma0',
+    '2: 31-60': 'sma1', '31-60': 'sma1',
+    '3: 61-90': 'pnpa', '61-90': 'pnpa',
+    '4: 91-120': 'npa', '91-120': 'npa',
+    '5: 121-180': 'npa', '121-180': 'npa', '121-150': 'npa', '151-180': 'npa',
+    '6: 181-365': 'npa', '181-365': 'npa', '181-210': 'npa', '211-250': 'npa', '251-365': 'npa',
+    '7: >365 days': 'npa', '>365 days': 'npa', '>365': 'npa', '>365days': 'npa', '>120': 'npa',
+}
 
 
 def _month_end_report_path():
@@ -460,14 +583,125 @@ def _resolve_period_month(data):
     return None
 
 
+def _has_pos_sheet(path):
+    """True if the workbook carries a 'POS' sheet (a generated Month-End report).
+    False for a raw PAR (Sheet1/Sheet2) or on any read error."""
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            return 'POS' in wb.sheetnames
+        finally:
+            wb.close()
+    except Exception:
+        return False
+
+
+def _par_product_type(prod, pid):
+    """Resolve a PAR row's product to a GrowwithmeDB product_type_id (1 IGL / 2 FIG /
+    3 IL). 'IGL & FIG' is split via ProductID (starts '6' or contains FIG -> FIG)."""
+    p = (prod or '').strip().upper()
+    if p == 'IGL & FIG':
+        s = str(pid or '').upper()
+        p = 'FIG' if (s.startswith('6') or 'FIG' in s) else 'IGL'
+    if p not in ('IGL', 'FIG'):
+        p = 'IL'
+    return _PORTFOLIO_PT_ID.get(p)
+
+
+def _parse_par_pos(path):
+    """Build branch×product POS rows straight from a RAW PAR file, so the Portfolio
+    tab can ingest a PAR without first generating a Month-End report.
+
+    Mirrors the Month-End engine (eod_processor.build_employee_report): bucket each
+    account's PrincipalOS by its DPD Days into regular/sma0/sma1/pnpa/npa, then sum
+    per (BranchName, product). Returns the SAME shape as _parse_pos_sheet, plus
+    per-bucket account counts:
+      [{branch, product_type_id, pos:{regular,sma0,sma1,pnpa,npa,total},
+        acc, acc_buckets:{regular,sma0,sma1,pnpa,npa}}, ...]
+    where `acc` is the total account (row) count per branch×product (Total Account
+    card) and `acc_buckets` are the per-DPD-bucket counts (Active Accounts card =
+    non-NPA buckets). `acc` == sum(acc_buckets).
+
+    Streams the sheet row-by-row with openpyxl read_only — a raw PAR can be 100 MB+
+    with 700k rows, so we never load it into a DataFrame.
+    """
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        # Prefer the account-level detail sheet ('Sheet1'); else the first sheet
+        # whose header carries PrincipalOS.
+        sheet = None
+        for name in (['Sheet1'] + [s for s in wb.sheetnames if s != 'Sheet1']):
+            ws = wb[name]
+            hdr = next(ws.iter_rows(values_only=True), None)
+            if hdr and any(str(c).strip() == 'PrincipalOS' for c in hdr if c is not None):
+                sheet = name
+                break
+        if sheet is None:
+            raise ValueError('PAR has no sheet with a PrincipalOS column.')
+
+        ws = wb[sheet]
+        it = ws.iter_rows(values_only=True)
+        header = [str(c).strip() if c is not None else '' for c in next(it)]
+        idx = {h: i for i, h in enumerate(header)}
+        dpd_col = next((c for c in ('DPD Days', 'Days Group', 'Days group', 'DaysGroup') if c in idx), None)
+        if dpd_col is None or 'PrincipalOS' not in idx or 'BranchName' not in idx:
+            raise ValueError('PAR missing required columns (need BranchName, DPD Days, PrincipalOS).')
+        i_branch, i_dpd, i_pos = idx['BranchName'], idx[dpd_col], idx['PrincipalOS']
+        i_prod = idx.get('Product Name')
+        i_pid = idx.get('ProductID')
+
+        # (branch, product_type_id) -> {bucket: pos_sum, ..., '_acc': count}
+        agg = {}
+        for row in it:
+            if not row or i_branch >= len(row):
+                continue
+            branch = str(row[i_branch]).strip() if row[i_branch] is not None else ''
+            if not branch:
+                continue
+            bucket = _PAR_DPD_POS.get(str(row[i_dpd]).strip().lower() if (i_dpd < len(row) and row[i_dpd] is not None) else '')
+            if not bucket:
+                continue
+            prod = row[i_prod] if (i_prod is not None and i_prod < len(row)) else ''
+            pid = row[i_pid] if (i_pid is not None and i_pid < len(row)) else ''
+            pt = _par_product_type(prod, pid)
+            if pt is None:
+                continue
+            pos_val = _num(row[i_pos]) if (i_pos < len(row)) else 0
+            key = (branch, pt)
+            slot = agg.get(key)
+            if slot is None:
+                slot = agg[key] = {
+                    'pos': {'regular': 0.0, 'sma0': 0.0, 'sma1': 0.0, 'pnpa': 0.0, 'npa': 0.0},
+                    'acc': {'regular': 0, 'sma0': 0, 'sma1': 0, 'pnpa': 0, 'npa': 0},
+                }
+            slot['pos'][bucket] += pos_val
+            slot['acc'][bucket] += 1
+
+        out = []
+        for (branch, pt), slot in agg.items():
+            pos = slot['pos']
+            pos['total'] = pos['regular'] + pos['sma0'] + pos['sma1'] + pos['pnpa'] + pos['npa']
+            acc_buckets = slot['acc']
+            out.append({
+                'branch': branch, 'product_type_id': int(pt),
+                'pos': pos,
+                'acc': int(sum(acc_buckets.values())),
+                'acc_buckets': acc_buckets,
+            })
+        return out
+    finally:
+        wb.close()
+
+
 @growwithme_bp.route('/sync-portfolio', methods=['POST'])
 def sync_portfolio():
-    """Push the Month-End report's POS sheet into GrowwithmeDB.portfolio_* (monthly).
+    """Push portfolio POS into GrowwithmeDB.portfolio_* (monthly).
 
     Body (JSON or multipart): {"period_month":"YYYY-MM-01"} (or month+year), plus
-    an optional `file` (a Month-End report .xlsx with a POS sheet). With a file,
-    that file is parsed; without one, the latest generated Month-End report is used.
-    Whole-month override — re-running for the same month replaces it.
+    an optional `file` (.xlsx). The file may be EITHER a Month-End report (its POS
+    sheet is read) OR a raw PAR (POS is built here from PrincipalOS × DPD, same as
+    the Month-End engine). Without a file, the latest generated Month-End report is
+    used. Whole-month override — re-running for the same month replaces it.
     """
     period_month = _resolve_period_month({
         'period_month': _param('period_month'), 'month': _param('month'), 'year': _param('year'),
@@ -485,13 +719,21 @@ def sync_portfolio():
         return jsonify({'success': False,
                         'message': 'No Month-End Employee Report found. Generate one first, or upload one.'}), 404
     try:
-        rows = _parse_pos_sheet(path)
-        # Derive Total Account from the demand-bucket counts (matches the live site).
-        # Best-effort — a derivation failure just falls back to a POS-sheet column.
-        try:
-            acc_map = _parse_demand_accounts(path)
-        except Exception as e:
-            logger.warning(f'GrowwithmeDB portfolio sync: account derivation failed: {e}')
+        if _has_pos_sheet(path):
+            # Generated Month-End report — read its POS sheet.
+            rows = _parse_pos_sheet(path)
+            # Derive Total Account from the demand-bucket counts (matches the live site).
+            # Best-effort — a derivation failure just falls back to a POS-sheet column.
+            try:
+                acc_map = _parse_demand_accounts(path)
+            except Exception as e:
+                logger.warning(f'GrowwithmeDB portfolio sync: account derivation failed: {e}')
+                acc_map = {}
+        else:
+            # Raw PAR upload — build the POS (PrincipalOS × DPD) directly. Account
+            # counts come from the PAR itself (per branch×product), so no acc_map.
+            logger.info('GrowwithmeDB portfolio sync: no POS sheet — treating upload as a raw PAR.')
+            rows = _parse_par_pos(path)
             acc_map = {}
     except Exception as e:
         logger.warning(f'GrowwithmeDB portfolio sync: POS parse failed: {e}')
@@ -516,16 +758,24 @@ def sync_portfolio():
     for r in rows:
         acc = acc_map.get((str(r['branch']).strip().upper(), r['product_type_id']))
         if acc is None:
-            acc = r.get('acc')  # POS-sheet column fallback
+            acc = r.get('acc')  # POS-sheet column / PAR-derived fallback
         if acc is not None:
-            acc_rows.append({'branch': r['branch'], 'product_type_id': r['product_type_id'], 'acc': int(round(acc))})
+            entry = {'branch': r['branch'], 'product_type_id': r['product_type_id'], 'acc': int(round(acc))}
+            # PAR-derived rows also carry per-DPD-bucket counts — drives the
+            # "Active Accounts" card (pos_status 8-12). Absent for POS-sheet syncs.
+            if r.get('acc_buckets'):
+                entry['acc_buckets'] = {k: int(v) for k, v in r['acc_buckets'].items()}
+            acc_rows.append(entry)
     if acc_rows:
         ok_a, res_a = _post('/api/portfolio/sync-accounts', {'period_month': period_month, 'rows': acc_rows})
         if ok_a:
             matched = int((res_a or {}).get('matched') or 0)
+            bucket_rows = int((res_a or {}).get('bucketRows') or 0)
             body['accounts_matched'] = matched
-            body['message'] = f"{body.get('message', '')} · {matched} Total Account rows".strip(' ·')
-            logger.info(f"GrowwithmeDB portfolio accounts sync: {matched} matched for {period_month}")
+            body['active_account_rows'] = bucket_rows
+            extra = f' (+ Active Accounts for {bucket_rows})' if bucket_rows else ''
+            body['message'] = f"{body.get('message', '')} · {matched} Total Account rows{extra}".strip(' ·')
+            logger.info(f"GrowwithmeDB portfolio accounts sync: {matched} matched, {bucket_rows} with buckets for {period_month}")
         else:
             body['accounts_ok'] = False
             body['message'] = f"{body.get('message', '')} · Total Account push FAILED: {res_a}".strip()

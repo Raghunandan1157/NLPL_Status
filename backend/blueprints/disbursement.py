@@ -125,20 +125,37 @@ def _parse_csv(path):
 
 
 def _parse_xlsx(path):
-    """Parse an ESAF disbursement xlsx. Header row is the first row with
-    'DisbStatus' (case-insensitive) — allows optional title rows above."""
+    """Parse an ESAF disbursement xlsx. Scans every sheet for the detail table —
+    the header row with 'DisbStatus' (case-insensitive) corroborated by a real
+    data column ('BranchName' or 'LoanDisbDate'), so a summary/pivot sheet that
+    merely carries a lone 'DisbStatus (All)' filter cell (e.g. 'sum' / 'Sheet1')
+    is skipped. Allows optional title rows above the header."""
     import pandas as pd
-    # Read without header first to locate the header row
-    head = pd.read_excel(path, header=None, nrows=15, engine='openpyxl')
-    header_row = None
-    for i in range(len(head)):
-        cells = [str(x).strip() for x in head.iloc[i].tolist()]
-        if any(c.lower() == 'disbstatus' for c in cells):
-            header_row = i
+
+    def _find_header(df15):
+        """Return the 0-based header row in df15 that holds the detail header, or None."""
+        for i in range(len(df15)):
+            cells = [str(x).strip().lower() for x in df15.iloc[i].tolist()]
+            if 'disbstatus' in cells and ('branchname' in cells or 'loandisbdate' in cells):
+                return i
+        return None
+
+    xls = pd.ExcelFile(path, engine='openpyxl')
+    sheet_name, header_row = None, None
+    for s in xls.sheet_names:
+        head = pd.read_excel(xls, sheet_name=s, header=None, nrows=15)
+        hr = _find_header(head)
+        if hr is not None:
+            sheet_name, header_row = s, hr
             break
-    if header_row is None:
-        header_row = 0
-    df = pd.read_excel(path, header=header_row, engine='openpyxl')
+    if sheet_name is None:
+        # Fall back to the old behaviour (first sheet, first 'DisbStatus' row) so a
+        # single-sheet detail export with an unusual layout still parses.
+        head = pd.read_excel(xls, sheet_name=0, header=None, nrows=15)
+        header_row = next((i for i in range(len(head))
+                           if any(str(x).strip().lower() == 'disbstatus' for x in head.iloc[i].tolist())), 0)
+        sheet_name = xls.sheet_names[0]
+    df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
     # Normalise LoanDisbDate — could be a datetime or string
     if 'LoanDisbDate' in df.columns:
