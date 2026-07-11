@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { CalendarDays, CloudUpload, Database, PieChart, Plug, RefreshCw, Users, Workflow } from "lucide-react";
+import { CalendarDays, CloudUpload, Database, PieChart, Plug, RefreshCw, UserCog, Users, Workflow } from "lucide-react";
 import { Button, FileDrop, useToast } from "../components/ui.jsx";
-import { ping, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
+import { fetchEmployee, ping, saveEmployee, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
 import "../eod/eod.css";
 
 const TABS = [
@@ -10,7 +10,21 @@ const TABS = [
   { id: "disbursement", label: "Disbursement", icon: CloudUpload },
   { id: "portfolio", label: "Portfolio", icon: PieChart },
   { id: "staff", label: "Staff", icon: Users },
+  { id: "employee", label: "Employee", icon: UserCog },
 ];
+
+const SCOPES = ["full", "region", "division", "area", "branch", "self"];
+
+// Module-level (stable identity) so editing a field doesn't remount the input
+// and lose focus between keystrokes.
+function EditField({ label, value, onChange, type = "text" }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <input className="input" type={type} value={value || ""} onChange={onChange} />
+    </label>
+  );
+}
 
 function todayIso() {
   const d = new Date();
@@ -257,6 +271,161 @@ function StaffTab() {
   );
 }
 
+const blankEmployee = (code) => ({
+  emp_id: code || "", name: "", mobile: "", branch: "", role: "", designation: "",
+  scope: "self", reporting_officer_id: "", gender: "", date_of_joining: "", date_of_birth: "",
+  region: "", division: "", area: "",
+});
+
+function EmployeeTab() {
+  const toast = useToast();
+  const [empId, setEmpId] = useState("");
+  const [form, setForm] = useState(null);
+  const [mode, setMode] = useState(null); // "edit" | "create"
+  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function load() {
+    const code = empId.trim();
+    if (!code) {
+      toast.warn("Enter an employee code (e.g. NL13071).");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetchEmployee(code);
+      if (r.found === false) {
+        // Genuinely not in the DB → open a blank form to CREATE this employee.
+        setForm(blankEmployee(code));
+        setMode("create");
+        toast.warn(`"${code}" isn't in the database — fill this form and Save to create them.`, "New employee");
+      } else {
+        setForm({ ...r.employee });
+        setMode("edit");
+        toast.success("Details loaded.", r.employee.name || code);
+      }
+    } catch (e) {
+      // A real failure (backend not running, network, server error) — NOT "create".
+      setForm(null);
+      setMode(null);
+      toast.error(e.message, "Fetch failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startNew() {
+    setForm(blankEmployee(empId.trim()));
+    setMode("create");
+  }
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function save() {
+    if (!String(form.emp_id || "").trim()) {
+      toast.warn("Employee code is required.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await saveEmployee({ ...form, emp_id: String(form.emp_id).trim() });
+      if (r.success) {
+        toast.success(r.message || "Saved.", `${form.emp_id} ${mode === "create" ? "created" : "updated"}`);
+        setMode("edit"); // after creating, it now exists
+      } else toast.error(r.message, "Save failed");
+    } catch (e) {
+      toast.error(e.message, "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const F = (label, k, type) => (
+    <EditField label={label} type={type} value={form[k]} onChange={(e) => set(k, e.target.value)} />
+  );
+
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Employee editor</p>
+          <h2>Edit or create an employee</h2>
+          <p className="sub">
+            <b>Fetch</b> an existing employee to edit their details and data-access <b>scope</b>, or click <b>New</b>{" "}
+            to create one.
+          </p>
+        </div>
+      </div>
+
+      <div className="control-grid" style={{ gridTemplateColumns: "1fr auto auto", marginBottom: 12, gap: 8 }}>
+        <label className="field">
+          <span>Employee code</span>
+          <input
+            className="input"
+            placeholder="e.g. NL13071"
+            value={empId}
+            onChange={(e) => setEmpId(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && load()}
+          />
+        </label>
+        <Button variant="ghost" icon={RefreshCw} loading={busy} onClick={load} style={{ alignSelf: "end" }}>
+          Fetch
+        </Button>
+        <Button variant="ghost" icon={UserCog} onClick={startNew} style={{ alignSelf: "end" }}>
+          New
+        </Button>
+      </div>
+
+      {form && (
+        <>
+          <div className="banner" style={{ marginBottom: 12 }}>
+            <UserCog size={15} />{" "}
+            {mode === "create" ? (
+              <span>Creating a <b>new</b> employee.</span>
+            ) : (
+              <span>Editing <b>{form.emp_id}</b>.</span>
+            )}
+          </div>
+
+          <div className="control-grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {mode === "create" && F("Employee code", "emp_id")}
+            {F("Name", "name")}
+            {F("Mobile", "mobile")}
+            {F("Branch", "branch")}
+            {F("Role", "role")}
+            {F("Designation", "designation")}
+            <label className="field">
+              <span>Scope (data access)</span>
+              <select className="input" value={form.scope || "self"} onChange={(e) => set("scope", e.target.value)}>
+                {SCOPES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {F("Reporting officer (emp code)", "reporting_officer_id")}
+            {F("Gender", "gender")}
+            {F("Date of joining", "date_of_joining", "date")}
+            {F("Date of birth", "date_of_birth", "date")}
+          </div>
+
+          <div className="banner" style={{ margin: "12px 0" }}>
+            <Database size={15} /> Current location: <b>{form.region || "—"}</b> / {form.division || "—"} /{" "}
+            {form.area || "—"}. For scope <b>region/division/area/branch</b>, the boundary comes from the branch above.
+          </div>
+
+          <div className="actions">
+            <Button variant="success" icon={CloudUpload} className="grow" loading={saving} onClick={save}>
+              Save changes
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function GrowwithmeModule() {
   const toast = useToast();
   const [tab, setTab] = useState("daily");
@@ -311,6 +480,7 @@ export default function GrowwithmeModule() {
       {tab === "disbursement" && <DisbTab />}
       {tab === "portfolio" && <PortfolioTab />}
       {tab === "staff" && <StaffTab />}
+      {tab === "employee" && <EmployeeTab />}
     </div>
   );
 }

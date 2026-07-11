@@ -321,6 +321,120 @@ def _parse_daily_collection(path):
         wb.close()
 
 
+# ── Product-split daily source (preferred) ────────────────────────────────
+# The raw Daily Collection Report's FIRST sheet ('OverAll') carries BRANCH +
+# OFFICER blocks split by product — titled 'BRANCH + OFFICER NAME WISE
+# COLLECTION REPORT (OverAll - IGL / - FIG / - IL)'. Parsing those recovers the
+# product_type_id the combined 'Employee Data' sheet drops (it hardcodes None),
+# so the frontend's IGL/FIG/IL tabs populate instead of going blank. Count-only
+# (amounts 0), same daily grain + whole-date override as _parse_daily_collection.
+_OVERALL_PRODUCT_BLOCKS = [('(OVERALL - IGL)', 1), ('(OVERALL - FIG)', 2), ('(OVERALL - IL)', 3)]
+# OverAll officer-block column indices (0-based within the row tuple).
+_OA = {
+    'name': 1, 'on_date_demand': 2, 'on_date_collection': 3,
+    'regular_demand': 5, 'regular_collection': 6,
+    'demand_1_30': 9, 'collection_1_30': 10,
+    'demand_31_60': 13, 'collection_31_60': 14,
+    'pnpa_demand': 17, 'pnpa_collection': 18,
+    'npa_cases': 25, 'npa_act_acc': 26, 'npa_act_amt': 27,
+    'npa_clo_acc': 28, 'npa_clo_amt': 29,
+}
+
+
+def _overall_block_title_rows(rows):
+    """Map product_type_id -> 0-based index (into `rows`) of each product block's
+    'BRANCH + OFFICER NAME WISE ... (OverAll - IGL/FIG/IL)' title, by scanning
+    column A. The combined '(OverAll)' block (no product suffix) is ignored."""
+    found = {}
+    for ri, row in enumerate(rows):
+        a = row[0] if row else None
+        if a is None:
+            continue
+        s = str(a).strip().upper()
+        if not s.startswith('BRANCH + OFFICER'):
+            continue
+        for suffix, pt in _OVERALL_PRODUCT_BLOCKS:
+            if s.endswith(suffix):
+                found[pt] = ri
+    return found
+
+
+def _has_overall_product_blocks(path):
+    """True if the workbook's 'OverAll' sheet carries all three product-split
+    officer blocks (IGL/FIG/IL) — the preferred, product-aware daily source."""
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            if 'OverAll' not in wb.sheetnames:
+                return False
+            rows = list(wb['OverAll'].iter_rows(values_only=True))
+            return len(_overall_block_title_rows(rows)) == 3
+        finally:
+            wb.close()
+    except Exception:
+        return False
+
+
+def _officer_code(label):
+    """Extract the officer code (e.g. NL10838) from an 'OFFICER NAME - NL#####'
+    block label, or None for area/branch subtotal + header rows."""
+    if label is None:
+        return None
+    tail = re.split(r'[-–]', str(label))[-1].strip()
+    return tail if _EMP_CODE_RE.match(tail) else None
+
+
+def _parse_daily_collection_products(path):
+    """Parse the raw Daily Collection Report's 'OverAll' sheet product officer
+    blocks into flat metric rows carrying product_type_id (1 IGL / 2 FIG / 3 IL),
+    so _explode feeds the daily collection sync WITH the product split. Only
+    officer rows (label ends in an NL##### code) are kept; area/branch subtotal
+    and header rows are skipped. Count-only (amounts 0), like the hourly grain."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        rows = list(wb['OverAll'].iter_rows(values_only=True))
+    finally:
+        wb.close()
+    titles = _overall_block_title_rows(rows)
+    if not titles:
+        raise ValueError("Daily Collection Report 'OverAll' sheet has no product blocks.")
+    # Each block runs from its title to the next block title (in sheet order).
+    starts = sorted(titles.values())
+    end_of = {s: (starts[i + 1] if i + 1 < len(starts) else len(rows))
+              for i, s in enumerate(starts)}
+
+    def g(row, key):
+        i = _OA[key]
+        return _safe_num(row[i]) if i < len(row) else 0
+
+    out = []
+    for pt, start in titles.items():
+        for ri in range(start + 1, end_of[start]):
+            row = rows[ri]
+            if not row:
+                continue
+            code = _officer_code(row[_OA['name']] if _OA['name'] < len(row) else None)
+            if not code:
+                continue
+            out.append({
+                'emp_id': code, 'product_type_id': pt,
+                'regular_demand': g(row, 'regular_demand'), 'regular_collection': g(row, 'regular_collection'),
+                'demand_1_30': g(row, 'demand_1_30'), 'collection_1_30': g(row, 'collection_1_30'),
+                'demand_31_60': g(row, 'demand_31_60'), 'collection_31_60': g(row, 'collection_31_60'),
+                'pnpa_demand': g(row, 'pnpa_demand'), 'pnpa_collection': g(row, 'pnpa_collection'),
+                'on_date_demand': g(row, 'on_date_demand'), 'on_date_collection': g(row, 'on_date_collection'),
+                'npa_cases': g(row, 'npa_cases'),
+                'npa_act_acc': g(row, 'npa_act_acc'), 'npa_act_amt': g(row, 'npa_act_amt'),
+                'npa_clo_acc': g(row, 'npa_clo_acc'), 'npa_clo_amt': g(row, 'npa_clo_amt'),
+                'regular_demand_amt': 0, 'regular_collection_amt': 0,
+                'demand_1_30_amt': 0, 'collection_1_30_amt': 0,
+                'demand_31_60_amt': 0, 'collection_31_60_amt': 0,
+                'pnpa_demand_amt': 0, 'pnpa_collection_amt': 0,
+                'on_date_demand_amt': 0, 'on_date_collection_amt': 0,
+            })
+    return out
+
+
 @growwithme_bp.route('/sync-daily', methods=['POST'])
 def sync_daily():
     """Push an EOD Employee Report into GrowwithmeDB (collection grain 2).
@@ -343,10 +457,17 @@ def sync_daily():
         return jsonify({'success': False,
                         'message': 'No EOD Employee Report found. Run EOD processing first, or upload one.'}), 404
     try:
-        if _has_employee_data_sheet(path):
-            # Raw Daily Collection Report — parse its combined 'Employee Data' sheet
+        if _has_overall_product_blocks(path):
+            # Raw Daily Collection Report — parse its 'OverAll' sheet product
+            # officer blocks (IGL/FIG/IL) so rows carry product_type_id and the
+            # frontend's product tabs populate. Preferred over the combined
+            # 'Employee Data' sheet, which drops the product split.
+            logger.info('GrowwithmeDB daily sync: parsing raw Daily Collection Report (OverAll product blocks).')
+            rows = _parse_daily_collection_products(path)
+        elif _has_employee_data_sheet(path):
+            # Fallback: older report with only the combined 'Employee Data' sheet
             # (count-only, product-combined). Same daily grain, whole-date override.
-            logger.info('GrowwithmeDB daily sync: parsing raw Daily Collection Report (Employee Data sheet).')
+            logger.info('GrowwithmeDB daily sync: parsing raw Daily Collection Report (Employee Data sheet, product-combined).')
             rows = _parse_daily_collection(path)
         else:
             rows = _parse_report(path)
@@ -878,38 +999,160 @@ def _parse_staff_sheet(path):
         wb.close()
 
 
+# ── Onboarding / access sheet ─────────────────────────────────────────────
+# The 'Employee_Onboarding_Template.xlsx' / 'Employee_Access_Current.xlsx' sheet
+# ('Employees', headers on the FIRST row) carries a `scope` column and optional
+# branch/role/designation. Unlike the HR 'Working' master (details-only), this
+# drives the FULL onboard on the API side (create employee + login/password +
+# info + assignment + SCOPE). Detected by the presence of a `scope` column.
+_ONBOARD_FIELDS = ['emp_id', 'name', 'mobile', 'branch', 'role', 'designation',
+                   'scope', 'reporting_officer_id', 'date_of_joining', 'date_of_birth', 'gender']
+
+
+def _parse_onboard_sheet(path):
+    """If `path` is an onboarding/access sheet (has emp_id + scope columns), return
+    its rows as onboard dicts. Otherwise return None (caller falls back to the HR
+    'Working' staff parser). Header row is auto-detected in the first 3 rows."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        names = wb.sheetnames
+        sheet = next((s for s in names if s.strip().lower() == 'employees'), names[0])
+        rows = list(wb[sheet].iter_rows(values_only=True))
+        low = lambda x: str(x).strip().lower() if x is not None else ''
+        hi, colmap = None, None
+        for r in range(min(3, len(rows))):
+            hdr = [low(c) for c in rows[r]]
+            cm = {}
+            for f in _ONBOARD_FIELDS:
+                alt = f.replace('_', ' ')
+                for i, h in enumerate(hdr):
+                    if h == f or h == alt:
+                        cm[f] = i
+                        break
+            if 'emp_id' in cm and 'scope' in cm:
+                hi, colmap = r, cm
+                break
+        if colmap is None:
+            return None  # not an onboarding sheet
+
+        def cell(row, f):
+            i = colmap.get(f)
+            if i is None or i >= len(row):
+                return None
+            return row[i]
+
+        out, seen = [], set()
+        for row in rows[hi + 1:]:
+            if not row:
+                continue
+            raw = cell(row, 'emp_id')
+            code = str(raw).strip() if raw is not None else ''
+            if not code or code.lower() == 'emp_id' or code in seen:
+                continue
+            seen.add(code)
+            txt = lambda f: (str(cell(row, f)).strip() if cell(row, f) is not None else None)
+            out.append({
+                'emp_id': code,
+                'name': txt('name'),
+                'mobile': txt('mobile'),
+                'branch': txt('branch'),
+                'role': txt('role'),
+                'designation': txt('designation'),
+                'scope': txt('scope'),
+                'reporting_officer_id': txt('reporting_officer_id'),
+                'date_of_joining': _excel_date(cell(row, 'date_of_joining')),
+                'date_of_birth': _excel_date(cell(row, 'date_of_birth')),
+                'gender': txt('gender'),
+            })
+        return out
+    finally:
+        wb.close()
+
+
 @growwithme_bp.route('/sync-staff', methods=['POST'])
 def sync_staff():
-    """Push an HR/staff master (a 'Working' sheet) into GrowwithmeDB — refreshes
-    name, phone, joining date, DOB and reporting manager. DETAILS-ONLY (never
-    changes branch/role/hierarchy). Upsert; never deletes. Requires an uploaded
-    `file`. Re-running is safe (idempotent — no duplicates)."""
+    """Upload handler for BOTH staff formats. If the file is an onboarding/access
+    sheet (an 'Employees' sheet with a `scope` column) it runs the FULL onboard
+    (create employee + login/password + info + branch/role/designation assignment
+    + SCOPE). Otherwise it treats the file as the HR 'Working' master and refreshes
+    DETAILS ONLY (name/phone/joining/DOB/manager). Upsert; never deletes; idempotent."""
     try:
         up, is_temp = _uploaded_file()
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)}), 400
     if not up:
-        return jsonify({'success': False, 'message': 'Upload a staff Excel file (with a "Working" sheet).'}), 400
+        return jsonify({'success': False, 'message': 'Upload a staff / access Excel file.'}), 400
     try:
+        # Access/onboarding sheet? (has a scope column) → full onboard.
+        onboard = _parse_onboard_sheet(up)
+        if onboard is not None:
+            if not onboard:
+                return jsonify({'success': False, 'message': 'No rows found in the Employees sheet.'}), 400
+            ok, res = _post('/api/employees/onboard', {'rows': onboard})
+            if not ok:
+                logger.warning(f'GrowwithmeDB onboard failed: {res}')
+                return jsonify({'success': False, 'message': res}), 502
+            res = res or {}
+            msg = (f"{res.get('created', 0)} new · {res.get('existed', 0)} updated · "
+                   f"{res.get('scoped', 0)} scope set · {res.get('assignments_set', 0)} assignments · "
+                   f"{res.get('logins_created', 0)} new logins")
+            if res.get('warnings'):
+                msg += f" · {len(res['warnings'])} warning(s)"
+            logger.info(f'GrowwithmeDB onboard: {len(onboard)} rows → {msg}')
+            return jsonify({'success': True, 'onboard_rows': len(onboard), 'message': msg, **res})
+
+        # Otherwise the HR 'Working' master → details-only sync.
         rows = _parse_staff_sheet(up)
+        if not rows:
+            return jsonify({'success': False, 'message': 'No staff rows found (need a "Working" sheet or an "Employees" access sheet with a scope column).'}), 400
+        ok, res = _post('/api/employees/sync-staff', {'rows': rows})
+        if not ok:
+            logger.warning(f'GrowwithmeDB staff sync failed: {res}')
+            return jsonify({'success': False, 'message': res}), 502
+        res = res or {}
+        msg = (f"{res.get('inserted_employees', 0)} new · {res.get('name_updates', 0)} updated · "
+               f"{res.get('contacts', 0)} phones · {res.get('personals', 0)} joining/DOB · "
+               f"{res.get('managers_set', 0)} managers")
+        logger.info(f'GrowwithmeDB staff sync: {len(rows)} rows → {msg}')
+        return jsonify({'success': True, 'staff_rows': len(rows), 'message': msg, **res})
     except Exception as e:
-        logger.warning(f'GrowwithmeDB staff sync: parse failed: {e}')
-        return jsonify({'success': False, 'message': f'Staff parse failed: {e}'}), 500
+        logger.warning(f'GrowwithmeDB staff/onboard sync: parse failed: {e}')
+        return jsonify({'success': False, 'message': f'Upload failed: {e}'}), 500
     finally:
         _cleanup(up, is_temp)
-    if not rows:
-        return jsonify({'success': False, 'message': 'No staff rows found in the Working sheet.'}), 400
 
-    ok, res = _post('/api/employees/sync-staff', {'rows': rows})
+
+# ── Single-employee editor (fetch + save details/scope) ───────────────────
+@growwithme_bp.route('/employee/<code>', methods=['GET'])
+def get_employee(code):
+    """Fetch one employee's editable details + current scope from GrowwithmeDB.
+    Returns found=False (still success) when the code isn't in the DB, so the UI
+    can offer to create it — distinct from a real fetch failure (success=False)."""
+    ok, res = _post('/api/employees/lookup', {'emp_id': str(code).strip()})
     if not ok:
-        logger.warning(f'GrowwithmeDB staff sync failed: {res}')
-        return jsonify({'success': False, 'message': res}), 502
+        return jsonify({'success': False, 'message': str(res)}), 502
     res = res or {}
-    msg = (f"{res.get('inserted_employees', 0)} new · {res.get('name_updates', 0)} updated · "
-           f"{res.get('contacts', 0)} phones · {res.get('personals', 0)} joining/DOB · "
-           f"{res.get('managers_set', 0)} managers")
-    logger.info(f'GrowwithmeDB staff sync: {len(rows)} rows → {msg}')
-    return jsonify({'success': True, 'staff_rows': len(rows), 'message': msg, **res})
+    if not res.get('found'):
+        return jsonify({'success': True, 'found': False, 'emp_id': str(code).strip()})
+    return jsonify({'success': True, 'found': True, 'employee': res})
+
+
+@growwithme_bp.route('/employee', methods=['POST'])
+def save_employee():
+    """Save one employee's edited details + scope via the full-onboard endpoint."""
+    row = request.get_json(silent=True) or {}
+    if not str(row.get('emp_id', '')).strip():
+        return jsonify({'success': False, 'message': 'emp_id is required'}), 400
+    ok, res = _post('/api/employees/onboard', {'rows': [row]})
+    if not ok:
+        return jsonify({'success': False, 'message': str(res)}), 502
+    res = res or {}
+    res.pop('passwords', None)  # never surface passwords to the UI
+    created = 'created' if res.get('created') else 'updated'
+    parts = [f"{created}", f"scope={row.get('scope') or 'self'}"]
+    if res.get('warnings'):
+        parts.append('; '.join(res['warnings'][:3]))
+    return jsonify({'success': True, 'message': ' · '.join(parts), **res})
 
 
 @growwithme_bp.route('/sync-disbursement', methods=['POST'])

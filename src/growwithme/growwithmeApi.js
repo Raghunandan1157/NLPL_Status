@@ -49,6 +49,13 @@ export function syncStaff(file) {
   return requestJson("/growwithme/sync-staff", { method: "POST", body: fd });
 }
 
+// Employee editor: fetch one employee's details + current scope by emp_id …
+export const fetchEmployee = (empId) =>
+  requestJson(`/growwithme/employee/${encodeURIComponent(String(empId).trim())}`);
+
+// … and save the edited details + scope (full onboard on a single row).
+export const saveEmployee = (row) => jsonPost("/growwithme/employee", row);
+
 // Pushes the Month-End report's POS sheet into GrowwithmeDB.portfolio_*
 // (branch+product+month). periodMonth = "YYYY-MM". Optional `file` = a custom
 // Month-End report to upload instead of the latest generated one.
