@@ -1123,6 +1123,15 @@ def sync_staff():
 
 
 # ── Single-employee editor (fetch + save details/scope) ───────────────────
+@growwithme_bp.route('/scope-options', methods=['GET'])
+def scope_options():
+    """Region/division/area/branch name lists for the scope-target picker."""
+    ok, res = _post('/api/employees/scope-options', {})
+    if not ok:
+        return jsonify({'success': False, 'message': str(res)}), 502
+    return jsonify({'success': True, 'options': res or {}})
+
+
 @growwithme_bp.route('/employee/<code>', methods=['GET'])
 def get_employee(code):
     """Fetch one employee's editable details + current scope from GrowwithmeDB.

@@ -49,6 +49,9 @@ export function syncStaff(file) {
   return requestJson("/growwithme/sync-staff", { method: "POST", body: fd });
 }
 
+// Scope-target picker options (region/division/area/branch name lists).
+export const scopeOptions = () => requestJson("/growwithme/scope-options");
+
 // Employee editor: fetch one employee's details + current scope by emp_id …
 export const fetchEmployee = (empId) =>
   requestJson(`/growwithme/employee/${encodeURIComponent(String(empId).trim())}`);

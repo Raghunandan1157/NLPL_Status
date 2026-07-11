@@ -19,7 +19,7 @@ const ROOT = resolve(__dirname, "..");
 const IS_WIN = process.platform === "win32";
 
 const BACKEND_PORT = process.env.NLPL_PORT || "5055";
-const FRONTEND_PORT = "5174";
+const FRONTEND_PORT = "5175"; // must match vite.config.js server.port (strictPort)
 const BACKEND_HEALTH = `http://127.0.0.1:${BACKEND_PORT}/api/health`;
 const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
 

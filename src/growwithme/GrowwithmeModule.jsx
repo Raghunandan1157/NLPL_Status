@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CalendarDays, CloudUpload, Database, PieChart, Plug, RefreshCw, UserCog, Users, Workflow } from "lucide-react";
 import { Button, FileDrop, useToast } from "../components/ui.jsx";
-import { fetchEmployee, ping, saveEmployee, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
+import { fetchEmployee, ping, saveEmployee, scopeOptions, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
 import "../eod/eod.css";
 
 const TABS = [
@@ -271,9 +271,11 @@ function StaffTab() {
   );
 }
 
+const TARGETED = ["region", "division", "area", "branch"]; // scopes that take a specific target
+
 const blankEmployee = (code) => ({
   emp_id: code || "", name: "", mobile: "", branch: "", role: "", designation: "",
-  scope: "self", reporting_officer_id: "", gender: "", date_of_joining: "", date_of_birth: "",
+  scope: "self", scope_target: "", reporting_officer_id: "", gender: "", date_of_joining: "", date_of_birth: "",
   region: "", division: "", area: "",
 });
 
@@ -284,6 +286,14 @@ function EmployeeTab() {
   const [mode, setMode] = useState(null); // "edit" | "create"
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [opts, setOpts] = useState({ region: [], division: [], area: [], branch: [] });
+
+  // Load the region/division/area/branch name lists once, for the target picker.
+  useEffect(() => {
+    scopeOptions()
+      .then((r) => r.options && setOpts(r.options))
+      .catch(() => {});
+  }, []);
 
   async function load() {
     const code = empId.trim();
@@ -396,7 +406,14 @@ function EmployeeTab() {
             {F("Designation", "designation")}
             <label className="field">
               <span>Scope (data access)</span>
-              <select className="input" value={form.scope || "self"} onChange={(e) => set("scope", e.target.value)}>
+              <select
+                className="input"
+                value={form.scope || "self"}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setForm((f) => ({ ...f, scope: v, scope_target: TARGETED.includes(v) ? f.scope_target : "" }));
+                }}
+              >
                 {SCOPES.map((s) => (
                   <option key={s} value={s}>
                     {s}
@@ -404,6 +421,39 @@ function EmployeeTab() {
                 ))}
               </select>
             </label>
+            {form.scope === "region" ? (
+              <div className="field" style={{ gridColumn: "1 / -1" }}>
+                <span>Which regions? (tick one or more — none = use their own branch&apos;s region)</span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: "8px 2px" }}>
+                  {(opts.region || []).map((n) => {
+                    const sel = (form.scope_target || "").split(",").map((s) => s.trim()).filter(Boolean);
+                    const checked = sel.includes(n);
+                    return (
+                      <label key={n} style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 500, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => set("scope_target", (checked ? sel.filter((x) => x !== n) : [...sel, n]).join(","))}
+                        />
+                        {n}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : TARGETED.includes(form.scope) ? (
+              <label className="field">
+                <span>Which {form.scope}?</span>
+                <select className="input" value={form.scope_target || ""} onChange={(e) => set("scope_target", e.target.value)}>
+                  <option value="">— use their own branch&apos;s {form.scope} —</option>
+                  {(opts[form.scope] || []).map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             {F("Reporting officer (emp code)", "reporting_officer_id")}
             {F("Gender", "gender")}
             {F("Date of joining", "date_of_joining", "date")}
