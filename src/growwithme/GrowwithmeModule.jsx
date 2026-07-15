@@ -31,6 +31,10 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function nowHour() {
+  return `${String(new Date().getHours()).padStart(2, "0")}:00`;
+}
+
 function thisMonth() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -84,11 +88,17 @@ function HourlyTab() {
   const toast = useToast();
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
+  // The Quick Report has no timestamp of its own, so the user states which
+  // date + hour this snapshot is "as of". These flow through /sync-hourly as
+  // period_date + period_hour and are what the growwithme report displays.
+  const [date, setDate] = useState(todayIso());
+  const [time, setTime] = useState(nowHour());
 
   async function sync() {
     setBusy(true);
     try {
-      const r = await syncHourly(undefined, undefined, file); // backend defaults date + hour to now
+      const hour = Number(String(time).split(":")[0]); // whole-hour grain
+      const r = await syncHourly(date, hour, file);
       if (r.success) toast.success(r.message || "Synced.", "Hourly synced to local DB");
       else toast.error(r.message, "Sync failed");
     } catch (e) {
@@ -110,8 +120,16 @@ function HourlyTab() {
       <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
         <FileDrop label="Upload Quick Report (optional)" hint=".xlsx — leave empty to use the latest generated report" accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
       </div>
-      <div className="actions">
-        <Button variant="success" icon={CloudUpload} className="grow" loading={busy} onClick={sync}>
+      <div className="control-grid" style={{ gridTemplateColumns: "1fr 1fr auto", marginBottom: 12 }}>
+        <label className="field">
+          <span>As-of date</span>
+          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} disabled={busy} />
+        </label>
+        <label className="field">
+          <span>As-of time (hour)</span>
+          <input className="input" type="time" step={3600} value={time} onChange={(e) => setTime(e.target.value)} disabled={busy} />
+        </label>
+        <Button variant="success" icon={CloudUpload} loading={busy} onClick={sync} style={{ alignSelf: "end" }}>
           {file ? "Upload & sync Quick Report" : "Sync latest Quick Report"}
         </Button>
       </div>
