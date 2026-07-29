@@ -49,5 +49,9 @@ Or on Windows just run `start.bat` (starts backend + frontend together).
 - Secrets: copy `.env.example` to `.env` and fill in Gmail / Supabase / EC2 values
   if you use email, Supabase sync, or the EC2 disbursement push. The app runs
   without them; those specific features just stay disabled.
+- The Growwithme tab (AWS sync) needs `GROWWITHME_API_URL` in `.env`. Skip it and
+  the backend defaults to `http://localhost:4000`, so every upload fails with
+  "growwithme-api not reachable". Verify with `GET /growwithme/ping` — it reports
+  the URL actually in use.
 - Advanced: to develop against an external engine checkout instead of the vendored
   one, set `UNIFIED_COLLECTION_DIR=/path/to/unified-collection-report`.
