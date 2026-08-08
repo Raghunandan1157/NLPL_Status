@@ -45,8 +45,10 @@ _FILES = {
     # Only the generated Hourly Fast Report is surfaced in Reports & Downloads
     # (named "Hourly Report"). The detailed Hourly Collection Report stays as a
     # *_Latest file for the VBA/bundle flow but is NOT archived/listed here.
+    # Plus the additional "Clients Not Paid" extract, when the run produced one.
     "hourly": {
         "output": ("Hourly_Fast_Report_Latest.xlsx", "Hourly Report.xlsx", "Hourly Report"),
+        "clients_not_paid": ("Clients_Not_Paid_Latest.xlsx", "Clients_Not_Paid.xlsx", "Clients Not Paid"),
     },
     "quick": {
         "output": ("Quick_Report_Latest.xlsx", "Quick Hourly Report.xlsx", "Quick Hourly Report"),
@@ -65,7 +67,7 @@ _FILES = {
 # natural key order of that module's _FILES entry.
 _ORDER_MAP = {
     "eod": ["output", "report"],
-    "hourly": ["output"],
+    "hourly": ["output", "clients_not_paid"],
     "quick": ["output"],
     "quick_month_end": ["output", "report", "employee"],
     "db": ["output"],
@@ -128,6 +130,10 @@ def _archived_name(module: str, type_: str, default_nice: str,
     if module == "hourly" and type_ == "output" and d:
         t = _safe_name_part(time_label)
         name = f"Hourly Report as on {d} {t}".strip()
+        return f"{name}.xlsx"
+    if module == "hourly" and type_ == "clients_not_paid" and d:
+        t = _safe_name_part(time_label)
+        name = f"Clients_Not_Paid as on {d} {t}".strip()
         return f"{name}.xlsx"
     return default_nice
 

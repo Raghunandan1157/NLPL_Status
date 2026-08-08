@@ -83,6 +83,12 @@ def _parse_trxdate_mixed(series):
 
 HOURLY_STATIC = str(config.STATIC_DIR / 'hourly')
 
+# Additional Hourly output: the report's FTOD clients (month-to-date demand not
+# collected as at the last EOD) minus whoever paid in the uploaded Hourly
+# Collection Report. Independent of the Hourly Report itself — see
+# services.clients_not_paid for how it reproduces the report's FTOD column.
+CLIENTS_NOT_PAID_LATEST = 'Clients_Not_Paid_Latest.xlsx'
+
 
 # ── Static file serving ────────────────────────────────────────────────
 
@@ -731,6 +737,10 @@ def process():
             logger.info(f"EOD Output loaded from Excel (no cache hit)")
         logger.info(f"EOD Output loaded: {len(eod_df)} rows")
         logger.info(f"EOD Output columns: {list(eod_df.columns)}")
+        # Snapshot of the source ("Regular Demand vs Collection") columns, taken
+        # BEFORE the hourly working columns are appended below. The Clients Not
+        # Paid file carries exactly these, so it stays a faithful extract.
+        eod_source_columns = list(eod_df.columns)
 
         # 7. Create new column name with the selected date
         new_col_name = f"Collection as on {selected_date}"
@@ -940,6 +950,62 @@ def process():
         except Exception as fast_err:
             logger.warning(f"Fast hourly report generation failed (non-fatal): {fast_err}")
 
+        # ── Clients Not Paid (additional, independent output) ──
+        # Purely additive: reads the data already loaded above and writes one
+        # extra workbook. It never feeds back into the Hourly Report, so a
+        # failure here leaves every existing number and file untouched.
+        # Runs BEFORE the fillna('') below, which would destroy numeric values.
+        clients_not_paid_stats = None
+        cnp_path = config.BACKEND_DATA_DIR / CLIENTS_NOT_PAID_LATEST
+        # Remove any previous run's file first so a failure this run can never
+        # leave stale results to be archived as if they were current.
+        cnp_path.unlink(missing_ok=True)
+        try:
+            from services.clients_not_paid import build_clients_not_paid
+
+            # An account that appears many times in the collection counts once,
+            # and counts as PAID as soon as it has a valid (> 0) payment.
+            # pivot_series is already one row per normalised account id.
+            paid_keys = set(pivot_series.index[pivot_series.fillna(0) > 0])
+
+            # The date the EOD run stamped for itself. Only meaningful when the
+            # EOD auto-flowed from that run — a hand-uploaded workbook may be
+            # older than the marker, in which case the date derived from the
+            # workbook's own Collection Date wins.
+            eod_declared_date = None
+            if source != 'upload':
+                td_file = config.BACKEND_DATA_DIR / '.target_date'
+                if td_file.exists():
+                    try:
+                        eod_declared_date = datetime.strptime(
+                            td_file.read_text().strip(), '%d-%m-%Y')
+                    except (OSError, ValueError):
+                        eod_declared_date = None
+
+            clients_not_paid_stats = build_clients_not_paid(
+                eod_df,
+                account_col=col_account_eod,
+                paid_keys=paid_keys,
+                report_date=pd.to_datetime(selected_date, format='%d-%m-%Y'),
+                output_path=cnp_path,
+                source_columns=eod_source_columns,
+                report_time=selected_time,
+                collection_rows=len(filtered_df),
+                collection_accounts=int(coll_keys.nunique()),
+                eod_report_date=eod_declared_date,
+            )
+            if clients_not_paid_stats:
+                logger.info(
+                    f"Clients Not Paid file generated: {cnp_path.name} "
+                    f"({clients_not_paid_stats['notPaidAccounts']:,} clients, "
+                    f"FTOD measured at the "
+                    f"{clients_not_paid_stats['eodReportDate']} EOD)"
+                )
+        except Exception as cnp_err:
+            logger.warning(f"Clients Not Paid generation failed (non-fatal): "
+                           f"{type(cnp_err).__name__}: {cnp_err}")
+            cnp_path.unlink(missing_ok=True)
+
         # Direct xlsxwriter with constant_memory for speed + low memory
         # NOTE: pandas to_excel + constant_memory silently drops data;
         # _write_excel_fast writes row-by-row which is safe.
@@ -984,7 +1050,14 @@ def process():
         )
         # Pass detected AccountID field name to frontend for VBA code injection
         response.headers['X-Account-ID-Field'] = col_account_eod
-        response.headers['Access-Control-Expose-Headers'] = 'X-Account-ID-Field'
+        exposed = ['X-Account-ID-Field']
+        # Clients Not Paid counts, so the UI can report them without a second call.
+        if clients_not_paid_stats:
+            response.headers['X-Not-Paid-Count'] = str(clients_not_paid_stats['notPaidAccounts'])
+            response.headers['X-Ftod-Count'] = str(clients_not_paid_stats['ftodAccounts'])
+            response.headers['X-Paid-Count'] = str(clients_not_paid_stats['paidAccounts'])
+            exposed += ['X-Not-Paid-Count', 'X-Ftod-Count', 'X-Paid-Count']
+        response.headers['Access-Control-Expose-Headers'] = ', '.join(exposed)
         t_total = _time.time() - t_process_start
         logger.info(f"Hourly Process Completed in {t_total:.2f} seconds")
 
@@ -1063,6 +1136,27 @@ def download_fast_report():
     dl_name = f'Hourly_Report_{date_str}.xlsx' if date_str else 'Hourly_Report.xlsx'
     return send_file(
         report_file,
+        as_attachment=True,
+        download_name=dl_name,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+# ── Clients Not Paid ─────────────────────────────────────────────────────
+
+@hourly_bp.route('/download-clients-not-paid', methods=['GET'])
+def download_clients_not_paid():
+    """Download the latest generated Clients Not Paid workbook."""
+    cnp_file = config.BACKEND_DATA_DIR / CLIENTS_NOT_PAID_LATEST
+    if not cnp_file.exists():
+        return jsonify({
+            'error': 'No Clients Not Paid file available. Run hourly processing first.'
+        }), 404
+    date_str = request.args.get('date', '')
+    safe_date = ''.join(c for c in date_str if c not in '\\/*?:"<>|').strip()
+    dl_name = f'Clients_Not_Paid_{safe_date}.xlsx' if safe_date else 'Clients_Not_Paid.xlsx'
+    return send_file(
+        cnp_file,
         as_attachment=True,
         download_name=dl_name,
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -1198,9 +1292,66 @@ def generate_fast_report():
         except Exception as ext_err:
             logger.warning(f"HOURLY FAST REPORT: Zero-collection ext skipped: {ext_err}")
 
+        # Refresh Clients Not Paid alongside the report, so a re-generated run is
+        # never archived with the previous run's unpaid list. Non-fatal.
+        cnp_stats = None
+        cnp_path = config.BACKEND_DATA_DIR / CLIENTS_NOT_PAID_LATEST
+        cnp_path.unlink(missing_ok=True)
+        try:
+            from services.clients_not_paid import (
+                build_clients_not_paid,
+                normalise_account_key,
+            )
+
+            acct_col = find_column(df, 'Account ID', 'AccountID')
+            if not acct_col:
+                raise ValueError("no Account ID column in the cached hourly data")
+
+            # The cached frame carries hourly collection in 'Collection'; paid =
+            # a positive collected amount. Working columns added by the hourly
+            # merge are dropped so the output mirrors the EOD source workbook.
+            hourly_coll = pd.to_numeric(df.get('Collection'), errors='coerce')
+            paid_keys = set(normalise_account_key(df.loc[hourly_coll.fillna(0) > 0, acct_col]))
+            src_cols = [c for c in df.columns
+                        if c not in ('Remark', 'Remark2')
+                        and not str(c).startswith('Collection as on')]
+
+            # The report date drives the FTOD window. Without an explicit one,
+            # anchor on today rather than max(Meeting Date) (= month-end), which
+            # would count clients whose meeting date has not arrived yet.
+            cnp_date = (pd.Timestamp(datetime.strptime(target_date_str, '%d-%m-%Y'))
+                        if target_date_str else pd.Timestamp.now().normalize())
+
+            # FTOD is measured at the EOD's own date (see clients_not_paid).
+            cnp_eod_date = None
+            _td = config.BACKEND_DATA_DIR / '.target_date'
+            if _td.exists():
+                try:
+                    cnp_eod_date = datetime.strptime(_td.read_text().strip(), '%d-%m-%Y')
+                except (OSError, ValueError):
+                    cnp_eod_date = None
+
+            cnp_stats = build_clients_not_paid(
+                df,
+                account_col=acct_col,
+                paid_keys=paid_keys,
+                report_date=cnp_date,
+                output_path=cnp_path,
+                source_columns=src_cols,
+                report_time=gen_time,
+                collection_rows=int(hourly_coll.notna().sum()),
+                collection_accounts=len(paid_keys),
+                eod_report_date=cnp_eod_date,
+            )
+        except Exception as cnp_err:
+            logger.warning(f"HOURLY FAST REPORT: Clients Not Paid skipped "
+                           f"({type(cnp_err).__name__}: {cnp_err})")
+            cnp_path.unlink(missing_ok=True)
+
         return jsonify({
             'success': True,
             'reportDate': target_date.strftime('%d-%m-%Y'),
+            'clientsNotPaid': cnp_stats,
             'message': 'Fast hourly report generated successfully.',
         })
 

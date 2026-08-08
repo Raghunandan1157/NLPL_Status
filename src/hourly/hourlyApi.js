@@ -41,7 +41,8 @@ export const cacheCollectionGdrive = () => requestJson("/hourly/cache-collection
  * only read the response headers (filename for display, AccountID field for the
  * VBA bundle) and discard the body.
  *
- * @returns {Promise<{filename: string, accountIdField: string}>}
+ * @returns {Promise<{filename: string, accountIdField: string,
+ *                    clientsNotPaid: {notPaid, ftod, paid}|null}>}
  */
 export async function processHourly({ files, options }) {
   const fd = new FormData();
@@ -90,6 +91,18 @@ export async function processHourly({ files, options }) {
 
   const accountIdField = response.headers.get("X-Account-ID-Field") || "";
 
+  // Counts for the additional Clients Not Paid file. Absent when that optional
+  // step produced nothing — the run itself is unaffected.
+  const notPaidHeader = response.headers.get("X-Not-Paid-Count");
+  const clientsNotPaid =
+    notPaidHeader === null
+      ? null
+      : {
+          notPaid: Number(notPaidHeader) || 0,
+          ftod: Number(response.headers.get("X-Ftod-Count")) || 0,
+          paid: Number(response.headers.get("X-Paid-Count")) || 0,
+        };
+
   // Resolve a clean download filename from Content-Disposition, falling back to
   // a date-stamped name so it is clear and never overflows the UI.
   let filename = "";
@@ -119,8 +132,12 @@ export async function processHourly({ files, options }) {
     /* ignore */
   }
 
-  return { filename, accountIdField };
+  return { filename, accountIdField, clientsNotPaid };
 }
+
+/** Direct download of the latest Clients Not Paid workbook. */
+export const downloadClientsNotPaidUrl = (date) =>
+  apiUrl(`/hourly/download-clients-not-paid?date=${encodeURIComponent(date || "")}`);
 
 export const saveToDownloads = () => requestJson("/hourly/save-to-downloads", { method: "POST" });
 

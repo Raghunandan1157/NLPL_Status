@@ -28,6 +28,7 @@ import {
   useBundle,
   saveBundleToServer,
   snapshotReports,
+  downloadClientsNotPaidUrl,
 } from "./hourlyApi.js";
 import { useProcessingJob } from "../shared/processing/useProcessingJob.js";
 import ProcessingPanel from "../shared/processing/ProcessingPanel.jsx";
@@ -84,7 +85,7 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
   const [selectedBundle, setSelectedBundle] = useState(null);
 
   const [busy, setBusy] = useState("");
-  const [report, setReport] = useState(null); // { filename }
+  const [report, setReport] = useState(null); // { filename, clientsNotPaid }
 
   const targetDateDMY = useMemo(() => {
     if (!targetDate) return "";
@@ -231,7 +232,7 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
 
         setSteps({ 1: "done", 2: "done", 3: "done", 5: "done" });
         setStep(4, "active"); // Saving to reports
-        setReport({ filename: res.filename });
+        setReport({ filename: res.filename, clientsNotPaid: res.clientsNotPaid });
         log(`Generated "${res.filename}".`, "success");
 
         // Persist bundle metadata on the server.
@@ -518,16 +519,39 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
             onRetry={canProcess ? handleRunProcess : undefined}
             reportCard={
               report && (
-                <div className="hourly-report-card">
-                  <FileSpreadsheet size={20} className="text-muted" />
-                  <div className="hourly-report-meta">
-                    <strong title={report.filename}>{report.filename}</strong>
-                    <span>Saved · available in Reports &amp; Downloads</span>
+                <>
+                  <div className="hourly-report-card">
+                    <FileSpreadsheet size={20} className="text-muted" />
+                    <div className="hourly-report-meta">
+                      <strong title={report.filename}>{report.filename}</strong>
+                      <span>Saved · available in Reports &amp; Downloads</span>
+                    </div>
+                    <Button variant="outline" icon={Download} onClick={handleSaveCopy}>
+                      Download
+                    </Button>
                   </div>
-                  <Button variant="outline" icon={Download} onClick={handleSaveCopy}>
-                    Download
-                  </Button>
-                </div>
+
+                  {/* Additional file — only shown when this run produced one. */}
+                  {report.clientsNotPaid && (
+                    <div className="hourly-report-card">
+                      <FileSpreadsheet size={20} className="text-muted" />
+                      <div className="hourly-report-meta">
+                        <strong>Clients_Not_Paid.xlsx</strong>
+                        <span>
+                          {report.clientsNotPaid.notPaid.toLocaleString()} clients ·{" "}
+                          EOD FTOD {report.clientsNotPaid.ftod.toLocaleString()} −{" "}
+                          {report.clientsNotPaid.paid.toLocaleString()} paid this hour
+                        </span>
+                      </div>
+                      <a
+                        className="btn btn-outline"
+                        href={downloadClientsNotPaidUrl(targetDateDMY)}
+                      >
+                        <Download size={15} /> Download
+                      </a>
+                    </div>
+                  )}
+                </>
               )
             }
           />
