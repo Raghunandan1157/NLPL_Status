@@ -405,6 +405,22 @@ def _is_month_end_date(target_date, force_regular_rules=False):
     return target_date.day == calendar.monthrange(target_date.year, target_date.month)[1]
 
 
+def _str_series(df, name, fallback=''):
+    """Column `name` as a plain str Series, whatever dtype it arrives as.
+
+    `df[name].fillna('')` is not safe here: the DuckDB path types an all-NULL
+    column as nullable Int32, and filling that with '' raises
+    "TypeError: Invalid value '' for dtype 'Int32'" — which aborted the whole
+    precomp and forced the slow re-read-the-written-xlsx report fallback.
+    Casting to object first works for object, string, Int32 and float columns
+    alike. Missing column -> a Series of `fallback`.
+    """
+    if name not in df.columns:
+        return pd.Series(fallback, index=df.index, dtype=object)
+    value = df[name]
+    return value.astype('object').where(value.notna(), fallback).astype(str)
+
+
 def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, ondate_next_date=None,
                                 pnpa_always_active=False):
     """Pre-compute all aggregations needed for district/branch sheet generation.
@@ -464,18 +480,18 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
     next_day2_mask = meeting_dt_clean == next_day2_clean
 
     # DPD Group classification
-    dpd = df['DPD Group'].fillna('').astype(str)
+    dpd = _str_series(df, 'DPD Group')
     is_130 = dpd.str.contains('1-30', na=False)
 
     # DPD Days column — falls back to DPD Group if DPD Days absent
-    dpd_days = df.get('DPD Days', df.get('DPD Group', pd.Series('', index=df.index))).fillna('').astype(str)
+    dpd_days = _str_series(df, 'DPD Days') if 'DPD Days' in df.columns else dpd
     # PNPA uses Last Month DPD (consistent with 1-30 and 31-60 buckets)
-    dpd_last_raw = df.get('DPD Group - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
+    dpd_last_raw = _str_series(df, 'DPD Group - Last Month')
     is_61_90 = dpd_last_raw.str.contains('61-90', na=False)
 
     # Last Month columns
-    dpd_last = df.get('DPD Group - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
-    status_last = df.get('Loan Status - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
+    dpd_last = dpd_last_raw
+    status_last = _str_series(df, 'Loan Status - Last Month')
     is_last_130 = dpd_last.str.contains('1-30', na=False)
     is_last_3160 = dpd_last.str.contains('31-60', na=False)
     is_last_active = status_last == 'Active Loan'
@@ -487,27 +503,27 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
     dpd_not_blank = ~dpd_is_blank
 
     # Product column
-    product_col = df['Product Name'].fillna('').astype(str)
+    product_col = _str_series(df, 'Product Name')
 
-    # Numeric columns - ensure numeric
-    reg_demand = pd.to_numeric(df.get('Regular Demand', 0), errors='coerce').fillna(0)
-    collection = pd.to_numeric(df.get('Collection', 0), errors='coerce').fillna(0)
-    no_reg_demand = pd.to_numeric(df.get('No of Regular Demand', 0), errors='coerce').fillna(0)
-    no_cumulative = pd.to_numeric(df.get('No of Cumulative', 0), errors='coerce').fillna(0)
-    cumulative_demand = pd.to_numeric(df.get('Cumulative Demand', 0), errors='coerce').fillna(0)
-    inst_coll_val = pd.to_numeric(df.get('installment - collected value', 0), errors='coerce').fillna(0)
+    # Numeric columns - ensure numeric (always Series)
+    reg_demand = pd.to_numeric(df['Regular Demand'] if 'Regular Demand' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
+    collection = pd.to_numeric(df['Collection'] if 'Collection' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
+    no_reg_demand = pd.to_numeric(df['No of Regular Demand'] if 'No of Regular Demand' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
+    no_cumulative = pd.to_numeric(df['No of Cumulative'] if 'No of Cumulative' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
+    cumulative_demand = pd.to_numeric(df['Cumulative Demand'] if 'Cumulative Demand' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
+    inst_coll_val = pd.to_numeric(df['installment - collected value'] if 'installment - collected value' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
 
     # FY flag
-    loan_date_flag = pd.to_numeric(df.get('Loan Date', 0), errors='coerce').fillna(0)
+    loan_date_flag = pd.to_numeric(df['Loan Date'] if 'Loan Date' in df.columns else pd.Series(0, index=df.index), errors='coerce').fillna(0)
 
     # On-date base mask: No of Regular Demand = 1 AND Regular Demand != 0
     od_base = (no_reg_demand == 1) & (reg_demand != 0)
 
     # Partial Amount column
-    partial_amt = df.get('Partial Amount', pd.Series('', index=df.index)).fillna('').astype(str)
+    partial_amt = _str_series(df, 'Partial Amount')
 
     # Officer Name for EmpID rows
-    officer_name_col = df.get('Officer Name', pd.Series('', index=df.index)).fillna('').astype(str)
+    officer_name_col = _str_series(df, 'Officer Name')
 
     # Pre-compute all metric source columns to avoid repeated masking
     # Regular (FTOD, exclude 1-30 for collection)
@@ -569,7 +585,7 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
     # When DPD Days is absent (pandas EOD path), it falls back to DPD Group — making
     # "0 Days" ∩ "1-30" impossible. In that case, use DPD Group="1: 1-30" alone
     # (accounts in 1-30 bucket that fully paid = the VBA intent).
-    dpd_days_val = df.get('DPD Days', df.get('DPD Group', pd.Series('', index=df.index))).fillna('').astype(str)
+    dpd_days_val = dpd_days
     is_0days = dpd_days_val == '0 Days'
     is_full_paid = partial_amt == 'Full EMI Paid'
     # reg_collection_display: DPD Group="1: 1-30" & has_collection, using no_reg_demand
@@ -623,7 +639,7 @@ def _compute_precomputed_sheets(df, target_date, force_regular_rules=False, onda
     #   Filter: Remark2="Full Collected" (for D/H/L/P columns)
     #   CURRENT DPD Days for bucket classification
     # VBA clears Remark2 filter for NPA columns (T/U).
-    remark2 = df.get('Remark2', pd.Series('', index=df.index)).fillna('').astype(str)
+    remark2 = _str_series(df, 'Remark2')
     is_remark2_full = remark2 == 'Full Collected'
 
     # Hourly Regular Collection (Col D): DPD Group="1: 1-30" AND has hourly Collection.
@@ -1170,7 +1186,9 @@ def _build_report_with_excel_fallback(precomputed, output_file, target_date, df,
         return report_path
 
     try:
-        logging.info("Report fallback: rebuilding precomp from written EOD output")
+        logging.warning("Report fallback: rebuilding precomp by re-reading the written "
+                        "EOD output — this is the slow path and means the in-memory "
+                        "pre-computation did not produce usable sheets")
         output_df = pd.read_excel(output_file, sheet_name='Sheet1')
         fallback_precomputed = _compute_precomputed_sheets(
             output_df,
@@ -1247,12 +1265,12 @@ def build_employee_report(df, target_date, output_path, par_file=None, force_reg
                 if _cand in df.columns:
                     _dpd_col = _cand
                     break
-        dpd = df.get(_dpd_col, pd.Series('', index=df.index)).fillna('').astype(str)
+        dpd = _str_series(df, _dpd_col)
         is_130 = dpd.str.contains('1-30', na=False)
-        dpd_days = df.get('DPD Days', df.get('DPD Group', pd.Series('', index=df.index))).fillna('').astype(str)
+        dpd_days = _str_series(df, 'DPD Days') if 'DPD Days' in df.columns else _str_series(df, 'DPD Group')
 
-        dpd_last = df.get('DPD Group - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
-        status_last = df.get('Loan Status - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
+        dpd_last = _str_series(df, 'DPD Group - Last Month')
+        status_last = _str_series(df, 'Loan Status - Last Month')
         is_61_90 = dpd_last.str.contains('61-90', na=False)
         is_last_130 = dpd_last.str.contains('1-30', na=False)
         is_last_3160 = dpd_last.str.contains('31-60', na=False)
@@ -1266,7 +1284,7 @@ def build_employee_report(df, target_date, output_path, par_file=None, force_reg
 
         # Product Name — derive from PAR if missing in demand
         if 'Product Name' in df.columns:
-            product_col = df['Product Name'].fillna('').astype(str)
+            product_col = _str_series(df, 'Product Name')
         else:
             product_col = pd.Series('IGL', index=df.index)
             if par_file is not None:
@@ -1296,7 +1314,7 @@ def build_employee_report(df, target_date, output_path, par_file=None, force_reg
         cumulative_demand = pd.to_numeric(df.get('Cumulative Demand', 0), errors='coerce').fillna(0)
         inst_coll_val = pd.to_numeric(df.get('installment - collected value', 0), errors='coerce').fillna(0)
         od_base = (no_reg_demand == 1) & (reg_demand != 0)
-        partial_amt = df.get('Partial Amount', pd.Series('', index=df.index)).fillna('').astype(str)
+        partial_amt = _str_series(df, 'Partial Amount')
 
         # Build working frame — handle column name variants (Area vs District, Emp ID vs OfficerID)
         def _text_col(name, fallback=''):
@@ -1649,12 +1667,12 @@ def build_employee_report_with_accounts(df, target_date, output_path, force_regu
                 if _cand in df.columns:
                     _dpd_col = _cand
                     break
-        dpd = df.get(_dpd_col, pd.Series('', index=df.index)).fillna('').astype(str)
+        dpd = _str_series(df, _dpd_col)
         is_130 = dpd.str.contains('1-30', na=False)
-        dpd_days = df.get('DPD Days', df.get('DPD Group', pd.Series('', index=df.index))).fillna('').astype(str)
+        dpd_days = _str_series(df, 'DPD Days') if 'DPD Days' in df.columns else _str_series(df, 'DPD Group')
 
-        dpd_last = df.get('DPD Group - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
-        status_last = df.get('Loan Status - Last Month', pd.Series('', index=df.index)).fillna('').astype(str)
+        dpd_last = _str_series(df, 'DPD Group - Last Month')
+        status_last = _str_series(df, 'Loan Status - Last Month')
         is_61_90 = dpd_last.str.contains('61-90', na=False)
         is_last_130 = dpd_last.str.contains('1-30', na=False)
         is_last_3160 = dpd_last.str.contains('31-60', na=False)
@@ -1665,7 +1683,7 @@ def build_employee_report_with_accounts(df, target_date, output_path, force_regu
         dpd_not_blank = ~dpd_is_blank
 
         has_collection = df['Collection'].notna() if 'Collection' in df.columns else pd.Series(False, index=df.index)
-        product_col = df['Product Name'].fillna('').astype(str)
+        product_col = _str_series(df, 'Product Name')
 
         reg_demand = pd.to_numeric(df.get('Regular Demand', 0), errors='coerce').fillna(0)
         collection = pd.to_numeric(df.get('Collection', 0), errors='coerce').fillna(0)
@@ -1674,16 +1692,17 @@ def build_employee_report_with_accounts(df, target_date, output_path, force_regu
         cumulative_demand = pd.to_numeric(df.get('Cumulative Demand', 0), errors='coerce').fillna(0)
         inst_coll_val = pd.to_numeric(df.get('installment - collected value', 0), errors='coerce').fillna(0)
         od_base = (no_reg_demand == 1) & (reg_demand != 0)
-        partial_amt = df.get('Partial Amount', pd.Series('', index=df.index)).fillna('').astype(str)
+        partial_amt = _str_series(df, 'Partial Amount')
 
         # Build working frame — with Account ID (NOT aggregated)
         w = pd.DataFrame(index=df.index)
-        w['Region'] = df.get('Region', '').astype(str).str.strip()
-        w['Division'] = df.get('Division', pd.Series('', index=df.index)).fillna('').astype(str).str.strip()
-        w['Area'] = df.get('Area', df.get('District', pd.Series('', index=df.index))).fillna('').astype(str).str.strip()
-        w['BranchName'] = df.get('BranchName', '').astype(str).str.strip()
-        w['Emp ID'] = df.get('Emp ID', '').astype(str).str.strip()
-        w['Officer Name'] = df.get('Officer Name', pd.Series('', index=df.index)).fillna('').astype(str).str.strip()
+        w['Region'] = _str_series(df, 'Region').str.strip()
+        w['Division'] = _str_series(df, 'Division').str.strip()
+        w['Area'] = (_str_series(df, 'Area') if 'Area' in df.columns
+                     else _str_series(df, 'District')).str.strip()
+        w['BranchName'] = _str_series(df, 'BranchName').str.strip()
+        w['Emp ID'] = _str_series(df, 'Emp ID').str.strip()
+        w['Officer Name'] = _str_series(df, 'Officer Name').str.strip()
 
         # Detect Account ID column
         acct_col = None
@@ -1966,8 +1985,11 @@ def process_files_duckdb(db_manager, demand_file, collection_file, par_file, out
         select_clauses.append("lm.LoanStatus as \"Loan Status - Last Month\"")
         joins.append("LEFT JOIN Legacy_Data lm ON CAST(d.\"Account ID\" AS VARCHAR) = CAST(lm.AccountID AS VARCHAR)")
     else:
-        select_clauses.append("NULL as \"DPD Group - Last Month\"")
-        select_clauses.append("NULL as \"Loan Status - Last Month\"")
+        # CAST, not a bare NULL: DuckDB types an untyped NULL literal as INTEGER,
+        # which reaches pandas as a nullable Int32 column and makes the text
+        # handling downstream awkward. These two are text columns when present.
+        select_clauses.append("CAST(NULL AS VARCHAR) as \"DPD Group - Last Month\"")
+        select_clauses.append("CAST(NULL AS VARCHAR) as \"Loan Status - Last Month\"")
 
     final_query = "WITH " + ",\n".join(ctes) + "\nSELECT \n" + ",\n".join(select_clauses) + "\n" + "\n".join(joins)
 
@@ -2057,7 +2079,14 @@ def process_files_duckdb(db_manager, demand_file, collection_file, par_file, out
         try:
             precomputed = _compute_precomputed_sheets(df_result, target_date, force_regular_rules=force_regular_rules)
         except Exception as e:
-            logging.warning(f"Pre-computation failed ({type(e).__name__}: {e}), continuing without precomp sheets")
+            # ERROR + traceback on purpose: this used to be a quiet warning, so a
+            # real crash here looked like a clean run while the report silently fell
+            # back to re-reading the just-written 56 MB workbook. If it fires, the
+            # aggregation sheets are missing and the run needs looking at.
+            logging.error(f"Pre-computation FAILED ({type(e).__name__}: {e}) — falling back "
+                          f"to rebuilding it from the written EOD output (much slower). "
+                          f"The _precomp sheet will be missing from the EOD workbook.",
+                          exc_info=True)
 
     # Type-safe fillna for DuckDB nullable integer columns, then bulk write
     df_result = _safe_fillna(df_result)
@@ -2229,7 +2258,14 @@ def process_files_pandas(demand_file, collection_file, par_file, output_file, au
         try:
             precomputed = _compute_precomputed_sheets(df_main, target_date, force_regular_rules=force_regular_rules)
         except Exception as e:
-            logging.warning(f"Pre-computation failed ({type(e).__name__}: {e}), continuing without precomp sheets")
+            # ERROR + traceback on purpose: this used to be a quiet warning, so a
+            # real crash here looked like a clean run while the report silently fell
+            # back to re-reading the just-written 56 MB workbook. If it fires, the
+            # aggregation sheets are missing and the run needs looking at.
+            logging.error(f"Pre-computation FAILED ({type(e).__name__}: {e}) — falling back "
+                          f"to rebuilding it from the written EOD output (much slower). "
+                          f"The _precomp sheet will be missing from the EOD workbook.",
+                          exc_info=True)
 
     # [Original Step 6]
     logging.info("STEP 4: Writing Excel output + building report")

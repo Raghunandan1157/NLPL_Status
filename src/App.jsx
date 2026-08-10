@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronRight, Database, FileSpreadsheet, Home, LayoutGrid, RefreshCw } from "lucide-react";
-import { ErrorBoundary, ToastProvider } from "./components/ui.jsx";
+import { ErrorBoundary, ToastProvider, useToast } from "./components/ui.jsx";
 import { getHealth } from "./eod/api.js";
 import { MODULES, getModule } from "./modules/registry.js";
 import HomePage from "./pages/HomePage.jsx";
@@ -12,11 +12,21 @@ import "./shared/processing/processing.css";
 
 function Shell() {
   const processing = useProcessing();
+  const toast = useToast();
   // view = "home" or a module id or "reports_page"
   const [view, setView] = useState(() => {
     const hash = window.location.hash.replace("#", "");
     return hash || "home";
   });
+  // Toasts no longer time out, so leaving the page is what retires them. A
+  // result from the Daily tab must not still be sitting there once you have
+  // moved to Portfolio, or it reads as if it belonged to the new screen.
+  // (A refresh clears them anyway — the state does not survive it.)
+  useEffect(() => {
+    toast.clear();
+    // `toast` is a fresh object each render; keying on view is the intent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
   const [health, setHealth] = useState(null);
   const [healthChecked, setHealthChecked] = useState(false);
 

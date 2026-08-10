@@ -12,10 +12,25 @@ export const ping = () => requestJson("/growwithme/ping");
 const jsonPost = (path, payload) =>
   requestJson(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 
-export const syncDaily = (date, file) => {
-  if (file) {
+// `file`        — the EOD / Daily Collection Report (collection figures).
+// `channelRows` — Mode of Collection, ALREADY AGGREGATED in the browser to
+//                 officer × channel totals (see aggregateChannelFile). Sending the
+//                 aggregate rather than the 5 MB workbook keeps the upload ~440 KB.
+//                 The backend still accepts a raw `channel_file` workbook as a
+//                 fallback, so both paths work.
+// `amountFile`  — "Regular Demand vs Collection" (the EOD output workbook). Its
+//                 hidden `_precomp` sheet is the ONLY source of rupee amounts:
+//                 the Daily Collection Report carries account counts only. Sent
+//                 whole, since the sheet is small and read server-side. Omit it
+//                 and the backend uses the EOD run archived for `date`.
+// Any, all, or none may be supplied. With none, the backend falls back to the
+// latest generated report (and simply skips the channel step).
+export const syncDaily = (date, file, channelRows, amountFile) => {
+  if (file || channelRows || amountFile) {
     const fd = new FormData();
-    fd.append("file", file);
+    if (file) fd.append("file", file);
+    if (channelRows) fd.append("channel_rows", JSON.stringify(channelRows));
+    if (amountFile) fd.append("amount_file", amountFile);
     fd.append("date", date);
     return requestJson("/growwithme/sync-daily", { method: "POST", body: fd });
   }

@@ -2105,6 +2105,9 @@ def build_report(pc_df, output_file, target_date, has_officer_col=True, sheets_d
     next_day = target_date + pd.Timedelta(days=1)
     next_day_str = next_day.strftime('%d-%m-%Y')
 
+    if isinstance(pc_df, dict):
+        pc_df = pc_df.get('_precomp', pc_df)
+
     for col in ['filter_type', 'filter_value', 'group_value', 'scope', 'product']:
         if col in pc_df.columns:
             pc_df[col] = pc_df[col].astype(str)

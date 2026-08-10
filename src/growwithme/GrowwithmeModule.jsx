@@ -26,9 +26,138 @@ function EditField({ label, value, onChange, type = "text" }) {
   );
 }
 
+// ── Mode of Collection: trim the workbook in the BROWSER before uploading ──
+// The "Collection report as on <date>" file is ~5 MB and 34 columns wide, but the
+// sync needs only 7 of those columns and only the rows for the selected date
+// (the file normally spans several days). Trimming here cuts it to a few hundred
+// KB, so the upload can't run into a proxy body limit on the way in.
+//
+// The column names below MUST match what _parse_collection_channels() reads in
+// backend/blueprints/growwithme_sync.py.
+const CHANNEL_COLUMNS = [
+  "Trxdate", "OfficerID", "OfficerName", "AccountID",
+  "CollectionTotal", "ReverseTotal", "ProductID", "CollectionChannel",
+];
+
+/** Excel serial (46238) or a real date -> "YYYY-MM-DD". Mirrors _excel_date(). */
+function excelToIso(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) {
+    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, "0")}-${String(v.getDate()).padStart(2, "0")}`;
+  }
+  const s = String(v).trim();
+  if (/^\d+$/.test(s)) {
+    // Excel's 1900 epoch with its leap-year quirk: serial 1 == 1900-01-01.
+    const d = new Date(Date.UTC(1899, 11, 30) + Number(s) * 86400000);
+    return d.toISOString().slice(0, 10);
+  }
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+}
+
+/** Officer digits, from the name's parentheses. Mirrors _officer_employee_code(). */
+function officerDigits(officerId, officerName) {
+  const m = /\((\d+)\)/.exec(String(officerName || ""));
+  const d = m ? m[1] : String(officerId || "").replace(/\D/g, "");
+  return d.replace(/^0+/, "") || null;
+}
+
+/**
+ * Read `file` and AGGREGATE it to officer × channel totals for `date`, entirely in
+ * the browser. Only the aggregate is uploaded — a few hundred KB of JSON instead
+ * of a 5 MB workbook, which is what "only the needed rows and columns" means in
+ * practice and removes any chance of a proxy body limit rejecting the upload.
+ *
+ * This mirrors _parse_collection_channels() in growwithme_sync.py exactly (same
+ * date filter, same DISTINCT AccountID count, same grouping key). That parser
+ * stays as the fallback for a raw workbook upload.
+ *
+ * Throws with a readable message if the file is the wrong report or holds nothing
+ * for the date — better to fail here, in front of the user, than after an upload.
+ */
+async function aggregateChannelFile(file, date) {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const sheet = wb.SheetNames.includes("Sheet1") ? "Sheet1" : wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: null });
+  if (!rows.length) throw new Error("The Mode of Collection file is empty.");
+  if (!("CollectionChannel" in rows[0])) {
+    throw new Error('No "CollectionChannel" column — is this the Collection report?');
+  }
+
+  const seen = new Set();
+  const agg = new Map();
+  let matched = 0;
+  for (const r of rows) {
+    const iso = excelToIso(r.Trxdate);
+    if (iso) seen.add(iso);
+    // Rows with no usable date are kept: the file is already date-scoped by name.
+    if (iso && iso !== date) continue;
+    const channel = String(r.CollectionChannel ?? "").trim().toUpperCase();
+    if (!channel) continue;
+    matched++;
+    const officerCode = String(r.OfficerID ?? "").trim();
+    const productId = r.ProductID == null ? null : String(r.ProductID).trim() || null;
+    const key = `${officerCode}|${channel}|${productId}`;
+    let slot = agg.get(key);
+    if (!slot) {
+      slot = {
+        officer_code: officerCode || null,
+        officer_digits: officerDigits(officerCode, r.OfficerName),
+        channel,
+        product_id: productId,
+        _accounts: new Set(),
+        amount: 0,
+        reversed: 0,
+      };
+      agg.set(key, slot);
+    }
+    if (r.AccountID != null) slot._accounts.add(String(r.AccountID));
+    slot.amount += Number(r.CollectionTotal) || 0;
+    slot.reversed += Number(r.ReverseTotal) || 0;
+  }
+  if (!agg.size) {
+    const span = [...seen].sort().join(", ") || "no recognisable dates";
+    throw new Error(`No rows dated ${date}. This file covers: ${span}.`);
+  }
+
+  const out = [...agg.values()].map(({ _accounts, amount, reversed, ...rest }) => ({
+    ...rest,
+    accounts: _accounts.size,
+    amount: Math.round(amount * 100) / 100,
+    reversed: Math.round(reversed * 100) / 100,
+  }));
+  return { rows: out, matched, total: rows.length, dates: [...seen].sort() };
+}
+
 function todayIso() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// "YYYY-MM-DD" for YESTERDAY — the day a daily report actually covers. Defaulting
+// the Date field to TODAY meant a report generated overnight for the 5th, uploaded
+// on the 6th, silently landed under the 6th: the sync is a whole-date override and
+// never questions the date it is handed, so nothing warned about it.
+function yesterdayIso() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Pull the as-on date out of a report filename, e.g.
+ *   "Daily Collection Report as on 05-08-2026.xlsx" -> "2026-08-05"
+ *   "Collection report as on 04-08-2026.xlsx"       -> "2026-08-04"
+ * The file states which day it covers, so it is a far better source than a date
+ * box the user has to remember to change. Returns null when there's no match.
+ */
+function dateFromFilename(name) {
+  const m = /(\d{2})-(\d{2})-(\d{4})/.exec(String(name || ""));
+  if (!m) return null;
+  const [, dd, mm, yyyy] = m;
+  const d = Number(dd), mo = Number(mm);
+  if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function nowHour() {
@@ -40,18 +169,112 @@ function thisMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+// "2026-07" — the last COMPLETED month. Portfolio is a month-end snapshot, so
+// this is the month you normally upload. It is the Portfolio tab's default:
+// defaulting to the current (still-running) month meant a July file uploaded on
+// 6 Aug silently landed under August, because /portfolio/sync upserts on
+// (branch, product, month) and never complains about the month it was handed.
+function lastCompletedMonth() {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-07" -> "Jul 2026", for unambiguous display. */
+function monthLabel(value) {
+  const [y, m] = String(value || "").split("-");
+  const i = Number(m) - 1;
+  return MONTH_LABELS[i] ? `${MONTH_LABELS[i]} ${y}` : value || "—";
+}
+
+// Explicit month list for the picker, newest first: the current (in-progress)
+// month, then `count` completed months back. A closed list beats a bare
+// <input type="month"> here — the value being uploaded into is always visible
+// and can't be left on a stale or mistyped month.
+function monthOptions(count = 24) {
+  const out = [];
+  const d = new Date();
+  d.setDate(1);
+  for (let i = 0; i <= count; i++) {
+    const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    out.push({ value, label: monthLabel(value), current: value === thisMonth() });
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
+}
+
 function DailyTab() {
   const toast = useToast();
-  const [date, setDate] = useState(todayIso());
+  // Yesterday, not today — see yesterdayIso(). A daily report covers a COMPLETED
+  // day, so today's date is almost never the right answer.
+  const [date, setDate] = useState(yesterdayIso());
   const [file, setFile] = useState(null);
+  // Second, independent workbook: only its CollectionChannel column is read, to
+  // drive the Collection module's Mode of Collection panel. Both files upload in
+  // one request; either may be omitted.
+  const [channelFile, setChannelFile] = useState(null);
+  // Third, independent workbook: the EOD "Regular Demand vs Collection" output.
+  // Only its `_precomp` sheet is read, for the RUPEE AMOUNTS — the Daily
+  // Collection Report has no amount columns at all, so without this (or an EOD
+  // run archived for the date) the MIS Amount view has nothing to show.
+  const [amountFile, setAmountFile] = useState(null);
+  const [trimNote, setTrimNote] = useState("");
+  const [dateNote, setDateNote] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Take the date from the FILENAME whenever it states one — the file knows which
+  // day it covers, the date box only knows what it was last set to.
+  function adoptFileDate(f, which) {
+    if (!f) return;
+    const d = dateFromFilename(f.name);
+    if (!d) return;
+    setDate((cur) => {
+      if (cur !== d) setDateNote(`Date set to ${d} from "${f.name}".`);
+      return d;
+    });
+    void which;
+  }
 
   async function sync() {
     setBusy(true);
     try {
-      const r = await syncDaily(date, file);
-      if (r.success) toast.success(r.message || "Synced.", "Daily synced to local DB");
-      else toast.error(r.message, "Sync failed");
+      // Aggregate the channel workbook in the browser and upload only the result.
+      // A 5 MB / 34-column / 30k-row file becomes ~440 KB of JSON, so the upload
+      // cannot hit a proxy body limit.
+      let channelRows = null;
+      if (channelFile) {
+        try {
+          const t = await aggregateChannelFile(channelFile, date);
+          channelRows = t.rows;
+          const kb = (JSON.stringify(t.rows).length / 1024).toFixed(0);
+          setTrimNote(`Mode of Collection: ${t.matched.toLocaleString()} of ${t.total.toLocaleString()} rows used for ${date}, sent as ${t.rows.length.toLocaleString()} officer×channel totals (${kb} KB).`);
+        } catch (e) {
+          setTrimNote("");
+          toast.error(e.message, "Mode of Collection file");
+          setBusy(false);
+          return;
+        }
+      }
+      const r = await syncDaily(date, file, channelRows, amountFile);
+      // The channel push is reported separately so a channel problem is visible
+      // even when the collection sync itself succeeded.
+      if (r.success && r.channels_ok === false) {
+        toast.warn(r.message, "Daily synced — Mode of Collection failed");
+      } else if (r.success && !r.amount_rows) {
+        // Counts landed but no rupees — the MIS Amount toggle will stay hidden
+        // for this date. Silent success here is what made the missing amounts so
+        // hard to spot in the first place.
+        toast.warn(r.message, "Daily synced — no rupee amounts");
+      } else if (r.success && r.amount_warning) {
+        toast.warn(r.message, "Daily synced — check the amount source");
+      } else if (r.success) {
+        toast.success(r.message || "Synced.", "Daily synced to local DB");
+      } else {
+        toast.error(r.message, "Sync failed");
+      }
     } catch (e) {
       toast.error(e.message, "Sync failed");
     } finally {
@@ -65,11 +288,40 @@ function DailyTab() {
         <div>
           <p className="eyebrow">EOD daily</p>
           <h2>Sync daily to database</h2>
-          <p className="sub">Pushes an EOD Employee Report — or a raw Daily Collection Report (its Employee Data sheet) — into GrowwithmeDB (collection grain 2). Whole-date override. Uses the latest generated report, or upload your own below.</p>
+          <p className="sub">Pushes an EOD Employee Report — or a raw Daily Collection Report (its Employee Data sheet) — into GrowwithmeDB (collection grain 2). Whole-date override. All three boxes below are optional: each falls back to the report already generated for this date, and attaching one only overrides that. File 1 gives accounts, file 2 Mode of Collection, file 3 the rupee amounts.</p>
         </div>
       </div>
-      <div className="file-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 12 }}>
-        <FileDrop label="Upload EOD Employee Report or Daily Collection Report (optional)" hint=".xlsx — an EOD Employee Report, or a raw Daily Collection Report. Leave empty to use the latest generated report." accept=".xlsx,.xls" file={file} onFile={setFile} disabled={busy} />
+      {/* Three independent uploads, sent together in one request. Every box is
+          optional and each carries an example filename, because all three are
+          ".xlsx from the same daily pack" and are otherwise easy to mix up.
+          FileDrop shows an X to remove a file once attached. */}
+      <div className="file-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", marginBottom: 12 }}>
+        <FileDrop
+          label="1 · Collection report — accounts (optional)"
+          hint='e.g. "Daily Collection Report as on 04-08-2026.xlsx" — an EOD Employee Report or a raw Daily Collection Report. Gives demand/collection ACCOUNT COUNTS. Leave empty to use the latest generated report.'
+          accept=".xlsx,.xls"
+          file={file}
+          onFile={(f) => { setFile(f); adoptFileDate(f, "collection"); }}
+          disabled={busy}
+        />
+        <FileDrop
+          label="2 · Mode of Collection (optional)"
+          hint='e.g. "Collection report as on 04-08-2026.xlsx" — only its CollectionChannel column is read. May span several days; only the selected date is used.'
+          accept=".xlsx,.xls"
+          file={channelFile}
+          // Clearing (or replacing) the file must drop the row-count note too —
+          // otherwise it keeps describing a file that is no longer attached.
+          onFile={(f) => { setChannelFile(f); setTrimNote(""); adoptFileDate(f, "channel"); }}
+          disabled={busy}
+        />
+        <FileDrop
+          label="3 · Regular Demand vs Collection — amounts (optional)"
+          hint='e.g. "Regular Demand vs Collection.xlsx" (the EOD output workbook) — the ONLY source of rupee amounts. Leave empty to use the EOD run archived for this date.'
+          accept=".xlsx,.xls"
+          file={amountFile}
+          onFile={(f) => { setAmountFile(f); adoptFileDate(f, "amount"); }}
+          disabled={busy}
+        />
       </div>
       <div className="control-grid" style={{ gridTemplateColumns: "1fr auto" }}>
         <label className="field">
@@ -77,9 +329,16 @@ function DailyTab() {
           <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </label>
         <Button variant="success" icon={CloudUpload} loading={busy} onClick={sync} style={{ alignSelf: "end" }}>
-          {file ? "Upload & sync" : "Sync latest"}
+          {file || channelFile || amountFile ? "Upload & sync" : "Sync latest"}
         </Button>
       </div>
+      <p className="sub" style={{ marginTop: 10 }}>
+        Syncing <b>{date || "—"}</b>
+        {dateNote ? <><br /><span style={{ color: "#b45309", fontWeight: 600 }}>{dateNote}</span></> : null}
+        {channelFile ? " · Mode of Collection will be refreshed for this date." : " · no Mode of Collection file attached."}
+        {amountFile ? " · rupee amounts from the attached workbook." : " · amounts from this date's EOD run, if one exists."}
+        {trimNote ? <><br />{trimNote}</> : null}
+      </p>
     </div>
   );
 }
@@ -189,16 +448,23 @@ function DisbTab() {
 
 function PortfolioTab() {
   const toast = useToast();
-  const [month, setMonth] = useState(thisMonth());
+  // Defaults to the last COMPLETED month — the one a month-end POS file belongs
+  // to. See lastCompletedMonth() for why the current month is the wrong default.
+  const [month, setMonth] = useState(lastCompletedMonth());
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
+  const options = monthOptions();
+  const isCurrentMonth = month === thisMonth();
 
   async function sync() {
     setBusy(true);
     try {
       const r = await syncPortfolio(month, file);
-      if (r.success) toast.success(r.message || "Synced.", "Portfolio synced to local DB");
-      else toast.error(r.message, "Sync failed");
+      // Report the month the SERVER resolved, not the one we sent — if they ever
+      // disagree, the toast is where that needs to be visible.
+      const landed = monthLabel(r.period_month ? String(r.period_month).slice(0, 7) : month);
+      if (r.success) toast.success(r.message || "Synced.", `Portfolio synced — ${landed}`);
+      else toast.error(r.message, `Sync failed — ${landed}`);
     } catch (e) {
       toast.error(e.message, "Sync failed");
     } finally {
@@ -224,13 +490,31 @@ function PortfolioTab() {
       </div>
       <div className="control-grid" style={{ gridTemplateColumns: "1fr auto" }}>
         <label className="field">
-          <span>Month</span>
-          <input className="input" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+          <span>Month to upload into</span>
+          <select className="input" value={month} onChange={(e) => setMonth(e.target.value)} disabled={busy}>
+            {options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+                {o.current ? " — current month (in progress)" : ""}
+              </option>
+            ))}
+          </select>
         </label>
         <Button variant="success" icon={CloudUpload} loading={busy} onClick={sync} style={{ alignSelf: "end" }}>
           {file ? "Upload & sync" : "Sync latest"}
         </Button>
       </div>
+      {/* The target month restated in words, right where the click happens —
+          "2026-07" in a picker is easy to misread; "July 2026" is not. */}
+      <p className="sub" style={{ marginTop: 10 }}>
+        This will write POS into <b>{monthLabel(month)}</b>, replacing whatever that month already holds.
+        {isCurrentMonth ? (
+          <b style={{ color: "#b45309" }}>
+            {" "}You've picked the current month, which hasn't ended yet — a month-end file usually belongs to{" "}
+            {monthLabel(lastCompletedMonth())}.
+          </b>
+        ) : null}
+      </p>
     </div>
   );
 }

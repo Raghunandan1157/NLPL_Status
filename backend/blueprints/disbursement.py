@@ -69,10 +69,16 @@ _MONTHS = {
 
 _EMP_RE = re.compile(r'(.*?)\((\d+)\)\s*$')
 
+# SchemeID/ProductID -> product. FIG and IL were interchanged here: the 6-prefixed
+# scheme was labelled IL and the 8-prefixed one FIG, which is the reverse of the
+# convention every other module uses — client_account_extract.py treats 60401/60201
+# as FIG, and growwithme_sync._par_product_type resolves any '6…' scheme to FIG.
+# The result was that the Disbursement screen showed FIG figures under IL and vice
+# versa. Swapped below to match.
 _PRODUCT_MAP = {
     '204207': 'IGL', '104207': 'IGL',
-    '604001': 'IL',
-    '81402': 'FIG', '264203': 'FIG',
+    '604001': 'FIG',
+    '81402': 'IL', '264203': 'IL',
 }
 
 
