@@ -480,8 +480,9 @@ def upload():
     file = request.files['file']
     original_filename = file.filename or "par.xlsx"
 
-    # Save to temp file
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    # Save to temp file in project data directory
+    config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", dir=config.TEMP_DIR)
     file.save(tmp.name)
     tmp.close()
 
@@ -674,55 +675,80 @@ def upload():
                 else:
                     df_ins = read_excel_fast(str(ins_path), sheet_name="Data")
 
-                ins_col = " Loan A/ No ( As Per Enrollment Form ) "
-                death_col = "Death Person (Member/Nominee)"
-                df_ins[ins_col] = df_ins[ins_col].astype(str).str.strip()
+                # Dynamic column matching for Account ID patterns
+                ins_col = _find_col(
+                    df_ins,
+                    "Account ID", "AccountID", "Account Id", "Account id", "AccountId", "Accountid",
+                    "Account_ID", "Account_Id", "Account No", "Account Number", "Loan Account Number",
+                    " Loan A/ No ( As Per Enrollment Form ) ", "Loan A/ No"
+                )
 
-                direct_lookup = {}
-                prefixed_lookup = {}
+                if not ins_col:
+                    # Fallback lookup: check for any column containing 'account' and ('id', 'no', or 'num')
+                    for col in df_ins.columns:
+                        c_clean = re.sub(r'[^a-z0-9]', '', str(col).lower())
+                        if 'account' in c_clean and ('id' in c_clean or 'no' in c_clean or 'num' in c_clean):
+                            ins_col = col
+                            break
 
-                for _, row in df_ins.iterrows():
-                    raw = str(row[ins_col]).strip()
-                    death_person = str(row.get(death_col, "")).strip()
-                    if raw in ("nan", "", "None"):
-                        continue
-                    alpha_match = re.match(r'^[A-Za-z]+(\d+)', raw)
-                    suffix_match = re.match(r'^(\d+)[-]\d*$', raw)
-                    if alpha_match:
-                        prefixed_lookup[alpha_match.group(1)] = death_person
-                    elif suffix_match:
-                        prefixed_lookup[suffix_match.group(1)] = death_person
-                    else:
-                        digits = re.sub(r'[^\d]', '', raw)
-                        if digits:
-                            direct_lookup[digits] = death_person
+                death_col = _find_col(
+                    df_ins,
+                    "Death Person (Member/Nominee)", "Death Person", "Death Person(Member/Nominee)"
+                ) or "Death Person (Member/Nominee)"
 
-                par_ids_str = df_filtered["AccountID"].astype(str).str.strip()
+                if not ins_col:
+                    yield _send_sse({
+                        "step": 5, "title": "Insurance OD Matching", "status": "skipped",
+                        "detail": f"Account ID column not found in insurance file. Columns: {', '.join(str(c) for c in df_ins.columns[:10])}"
+                    })
+                else:
+                    df_ins[ins_col] = df_ins[ins_col].astype(str).str.strip()
 
-                # Vectorized lookup (was a per-row .loc loop — slow on 100k+ rows).
-                direct_mask = par_ids_str.isin(direct_lookup.keys())
-                df_filtered.loc[direct_mask, "Insurance OD"] = "Insurance OD"
-                df_filtered.loc[direct_mask, "Death Person"] = (
-                    par_ids_str[direct_mask].map(direct_lookup).fillna(""))
+                    direct_lookup = {}
+                    prefixed_lookup = {}
 
-                prefixed_mask = par_ids_str.isin(prefixed_lookup.keys()) & ~direct_mask
-                df_filtered.loc[prefixed_mask, "Insurance OD"] = "Nominee Insurance OD"
-                df_filtered.loc[prefixed_mask, "Death Person"] = (
-                    par_ids_str[prefixed_mask].map(prefixed_lookup).fillna(""))
+                    for _, row in df_ins.iterrows():
+                        raw = str(row[ins_col]).strip()
+                        death_person = str(row.get(death_col, "")).strip()
+                        if raw in ("nan", "", "None"):
+                            continue
+                        alpha_match = re.match(r'^[A-Za-z]+(\d+)', raw)
+                        suffix_match = re.match(r'^(\d+)[-]\d*$', raw)
+                        if alpha_match:
+                            prefixed_lookup[alpha_match.group(1)] = death_person
+                        elif suffix_match:
+                            prefixed_lookup[suffix_match.group(1)] = death_person
+                        else:
+                            digits = re.sub(r'[^\d]', '', raw)
+                            if digits:
+                                direct_lookup[digits] = death_person
 
-                ins_direct = int(direct_mask.sum())
-                ins_nominee = int(prefixed_mask.sum())
-                ins_total_records = len(df_ins)
+                    par_ids_str = df_filtered["AccountID"].astype(str).str.strip()
 
-                yield _send_sse({
-                    "step": 5, "title": "Insurance OD Matching", "status": "done",
-                    "detail": f"Insurance file: {ins_path.name} ({ins_total_records:,} records)",
-                    "sub": [
-                        f"Direct match (Insurance OD): {ins_direct:,}",
-                        f"Nominee match (Nominee Insurance OD): {ins_nominee:,}",
-                        f"Total matched: {ins_direct + ins_nominee:,}",
-                    ]
-                })
+                    # Vectorized lookup
+                    direct_mask = par_ids_str.isin(direct_lookup.keys())
+                    df_filtered.loc[direct_mask, "Insurance OD"] = "Insurance OD"
+                    df_filtered.loc[direct_mask, "Death Person"] = (
+                        par_ids_str[direct_mask].map(direct_lookup).fillna(""))
+
+                    prefixed_mask = par_ids_str.isin(prefixed_lookup.keys()) & ~direct_mask
+                    df_filtered.loc[prefixed_mask, "Insurance OD"] = "Nominee Insurance OD"
+                    df_filtered.loc[prefixed_mask, "Death Person"] = (
+                        par_ids_str[prefixed_mask].map(prefixed_lookup).fillna(""))
+
+                    ins_direct = int(direct_mask.sum())
+                    ins_nominee = int(prefixed_mask.sum())
+                    ins_total_records = len(df_ins)
+
+                    yield _send_sse({
+                        "step": 5, "title": "Insurance OD Matching", "status": "done",
+                        "detail": f"Insurance file: {ins_path.name} ({ins_total_records:,} records)",
+                        "sub": [
+                            f"Direct match (Insurance OD): {ins_direct:,}",
+                            f"Nominee match (Nominee Insurance OD): {ins_nominee:,}",
+                            f"Total matched: {ins_direct + ins_nominee:,}",
+                        ]
+                    })
             else:
                 yield _send_sse({
                     "step": 5, "title": "Insurance OD Matching", "status": "skipped",
