@@ -1,0 +1,13 @@
+{
+  // The backend imports the reused engine by module name — `import config`,
+  // `from blueprints.eod import ...`, `from services...` — which only works
+  // because settings.bootstrap() puts backend/ and backend/engine/ on sys.path
+  // before those imports run (see backend/settings.py and the E402 noqa marks
+  // in backend/app.py).
+  //
+  // The editor's import checker does not execute bootstrap(), so without these
+  // paths it cannot find those modules and marks them red even though the app
+  // runs fine. These are the same two directories bootstrap() adds.
+  "python.analysis.extraPaths": ["backend", "backend/engine"],
+  "python.autoComplete.extraPaths": ["backend", "backend/engine"]
+}
