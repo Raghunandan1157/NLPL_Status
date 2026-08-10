@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Database, FileSpreadsheet, UploadCloud } from "lucide-react";
 import { Button, FileDrop, useToast } from "../../components/ui.jsx";
 import { fileSizeMB } from "../../lib/format.js";
-import { ingestMasterFile, uploadMasterFile } from "../dbApi.js";
+import { ingestMasterFile, removeMasterFile, uploadMasterFile } from "../dbApi.js";
 
 function formatWhen(epochSeconds) {
   if (!epochSeconds) return null;
@@ -29,7 +29,11 @@ export default function MasterFileCard({ file, onChange }) {
   const uploadedWhen = formatWhen(file.modified);
 
   async function handleUpload(f) {
-    if (!f) return;
+    // Clearing the picker (the X) is a local action — drop the pick and stop.
+    if (!f) {
+      setPicked(null);
+      return;
+    }
     setPicked(f);
     setBusy("upload");
     try {
@@ -39,6 +43,19 @@ export default function MasterFileCard({ file, onChange }) {
       await onChange?.();
     } catch (e) {
       toast.error(e.message, "Upload failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleRemove() {
+    setBusy("remove");
+    try {
+      const res = await removeMasterFile(file.backendKey);
+      toast.success(res?.message || `${file.label} removed.`, "Removed");
+      await onChange?.();
+    } catch (e) {
+      toast.error(e.message, "Remove failed");
     } finally {
       setBusy("");
     }
@@ -104,12 +121,17 @@ export default function MasterFileCard({ file, onChange }) {
         </dl>
       </div>
 
+      {/* The remove control appears once a file is saved on the backend, so a
+          wrong upload can be deleted instead of only overwritten. */}
       <FileDrop
         label={file.saved ? `Replace ${file.label}` : `Upload ${file.label}`}
         hint="Excel file (.xlsx)"
         file={picked}
         onFile={handleUpload}
         disabled={Boolean(busy)}
+        onRemove={file.saved && !picked ? handleRemove : undefined}
+        removing={busy === "remove"}
+        removeLabel={`Remove the saved ${file.label}`}
       />
 
       <div className="actions db-card-actions">

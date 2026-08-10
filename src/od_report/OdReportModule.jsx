@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, FileCheck2, Play, Sparkles } from "lucide-react";
 import { Button, FileDrop, ProgressBar, Spinner, useToast } from "../components/ui.jsx";
-import { checkIns, checkOd, processOd, uploadIns, uploadOd } from "./odApi.js";
+import { checkIns, checkOd, deleteStaged, processOd, uploadIns, uploadOd } from "./odApi.js";
 import "../eod/eod.css";
 
 export default function OdReportModule() {
@@ -47,6 +47,22 @@ export default function OdReportModule() {
       toast.success(`Insurance file ready: ${res.filename}`, "Uploaded");
     } catch (e) {
       toast.error(e.message, "Upload failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Both optional inputs are stored on the backend once uploaded, so removing
+  // is the only way to run without them again — or to swap in a different file.
+  async function handleRemoveStaged(type) {
+    setBusy(`remove-${type}`);
+    try {
+      const res = await deleteStaged(type);
+      if (type === "od") setOdStaged(null);
+      else setInsStaged(null);
+      toast.success(res?.message || "File removed.", "Removed");
+    } catch (e) {
+      toast.error(e.message, "Remove failed");
     } finally {
       setBusy("");
     }
@@ -124,7 +140,14 @@ export default function OdReportModule() {
 
             <div className="file-grid" style={{ gridTemplateColumns: "repeat(2, 1fr)", marginTop: 4 }}>
               {odStaged ? (
-                <FileDrop locked lockedText="Month-End OD file ready" hint={odStaged.filename} />
+                <FileDrop
+                  locked
+                  lockedText="Month-End OD file ready"
+                  hint={odStaged.filename}
+                  onRemove={() => handleRemoveStaged("od")}
+                  removing={busy === "remove-od"}
+                  removeLabel="Remove the month-end OD file"
+                />
               ) : (
                 <FileDrop
                   label="Month-End OD (.xlsx/.xlsb)"
@@ -136,7 +159,14 @@ export default function OdReportModule() {
                 />
               )}
               {insStaged ? (
-                <FileDrop locked lockedText="Insurance file ready" hint={insStaged.filename} />
+                <FileDrop
+                  locked
+                  lockedText="Insurance file ready"
+                  hint={insStaged.filename}
+                  onRemove={() => handleRemoveStaged("ins")}
+                  removing={busy === "remove-ins"}
+                  removeLabel="Remove the insurance file"
+                />
               ) : (
                 <FileDrop
                   label="Insurance file"

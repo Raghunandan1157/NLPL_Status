@@ -5,9 +5,15 @@ Report calculations: it only *reads* data the hourly pipeline has already
 loaded and writes one extra workbook.
 
     Latest EOD output ( = the "Regular Demand vs Collection" workbook )
-        -> FTOD rows — the accounts the EOD report itself reports as not paid
+        -> FTOD rows      — demand up to the EOD date the EOD reports as not paid
+        +  TODAY's demand — the days after the EOD, not collected in the EOD file
         -> drop every account that paid in the uploaded Hourly Collection Report
         = Clients Not Paid, carrying every column of the source workbook
+
+The population therefore spans BOTH the carry-forward from the last EOD and the
+demand that has fallen due since it, e.g. 7,699 FTOD at yesterday's EOD plus
+10,992 due today = 18,691 to collect, minus everyone who has paid in today's
+hourly collection file (yesterday's 100 + today's ~9,000) = the clients listed.
 
 FTOD is the report's shortfall column, NOT the demand base. In the OverAll
 sheet's REGULAR DEMAND VS COLLECTION block the columns are
@@ -29,14 +35,24 @@ output is the ones among them that have still not paid in the hourly file.
 
 Verification identity (printed on the Summary sheet, tying to the report):
 
-    Regular Demand - collected at EOD = FTOD          (report's OverAll row)
-    FTOD - paid in the Hourly Collection = Clients Not Paid
+    Regular Demand up to the EOD date - collected at EOD = FTOD   (report's row)
+    FTOD + demand due after the EOD and not collected     = To collect
+    To collect - paid in the Hourly Collection            = Clients Not Paid
 
-The window ends on the EOD's OWN date, not the hourly run's date (see
-_resolve_eod_date). An hourly run on 08-08 against a 07-08 EOD therefore still
-reports the 07-08 numbers — 77,041 / 67,338 / 9,703 — because that is what the
-latest EOD measured; stretching the window to 08-08 would add 08-08's demand
-(77,115 / 67,412), which no EOD has assessed yet.
+The two segments are split on the EOD's OWN date (see _resolve_eod_date), and
+each is judged by the rule that applies to it:
+
+  * up to the EOD date  — the EOD has assessed these, so the report's own
+    shortfall rule decides: still sitting in DPD Group "1-30" = not paid. This
+    segment alone reproduces the report's FTOD column (the 07-08-2026 report:
+    77,041 demand - 67,338 collection = 9,703 FTOD).
+  * after the EOD date, through the hourly run's date — no EOD has assessed
+    these yet, so the DPD bucket cannot be used; the workbook's own "Collection"
+    value decides: nothing collected = not paid.
+
+Rows in the output are tagged in the ``Unpaid Segment`` column with which of the
+two they came from — "FTOD up to <EOD date>" and "Demand on <today's date>" —
+and the Summary sheet states both counts separately.
 """
 from __future__ import annotations
 
@@ -56,6 +72,23 @@ LATEST_FILENAME = 'Clients_Not_Paid_Latest.xlsx'
 
 DATA_SHEET = 'Clients Not Paid'
 SUMMARY_SHEET = 'Summary'
+
+# Tag column added to the output so each listed client shows which segment it
+# came from: the carry-forward FTOD, or demand that fell due after the EOD.
+SEGMENT_COL = 'Unpaid Segment'
+
+
+def _eod_collection_column(eod_df):
+    """The EOD workbook's own collection amount column.
+
+    Matched strictly: the hourly pipeline appends a "Collection as on <date>"
+    working column and the workbook carries "Collection Date", neither of which
+    is the collected amount — a loose match would silently pick one of them.
+    """
+    for col in eod_df.columns:
+        if str(col).strip().lower() == 'collection':
+            return col
+    return None
 
 
 def normalise_account_key(series: pd.Series) -> pd.Series:
@@ -198,7 +231,7 @@ def _write_workbook(df: pd.DataFrame, summary_rows: list, output_path) -> None:
 def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
                            output_path, source_columns=None, report_time='',
                            collection_rows=0, collection_accounts=0,
-                           eod_report_date=None):
+                           eod_report_date=None, eod_collection_col='auto'):
     """Build ``Clients_Not_Paid.xlsx`` from the EOD output already in memory.
 
     Args:
@@ -216,6 +249,11 @@ def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
             (Remark / Remark2 / "Collection as on …") are left out.
         report_time / collection_rows / collection_accounts: recorded on the
             Summary sheet for traceability.
+        eod_collection_col: the column holding the EOD's OWN collected amount,
+            used to decide whether demand due after the EOD date was already
+            collected. ``'auto'`` finds it; pass ``None`` when the frame's
+            'Collection' column has been overwritten with hourly values (the
+            fast-report path), so that demand is judged by the hourly file alone.
 
     Returns a stats dict, or None if the file could not be produced (caller
     treats that as non-fatal — the Hourly Report is unaffected either way).
@@ -234,9 +272,12 @@ def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
     anchor = _resolve_anchor(meeting_dt, report_date)
     first_of_month = anchor.replace(day=1)
 
-    # Measure FTOD against the EOD's own date, not the hourly run's date.
+    # The EOD's own date splits the two segments. Everything up to it has been
+    # assessed by an EOD; everything after it (through the hourly run's date)
+    # has not, and is judged on the workbook's own Collection value instead.
     eod_date = _resolve_eod_date(eod_df, first_of_month, anchor, eod_report_date)
     ftod_mask = (meeting_dt >= first_of_month) & (meeting_dt <= eod_date)
+    today_mask = (meeting_dt > eod_date) & (meeting_dt <= anchor)
 
     # The report's demand base: a row inside the window that carries a regular
     # demand instalment (the report's DEMAND column).
@@ -251,6 +292,20 @@ def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
         )
         has_demand = pd.Series(True, index=eod_df.index)
     demand_mask = ftod_mask & has_demand
+    today_demand_mask = today_mask & has_demand
+
+    # "Nothing collected in the EOD file" — the rule for the days no EOD has
+    # assessed yet, and the fallback for the assessed days when the workbook
+    # carries no DPD bucket.
+    coll_col = (_eod_collection_column(eod_df) if eod_collection_col == 'auto'
+                else eod_collection_col)
+    if coll_col and coll_col in eod_df.columns:
+        eod_collection = pd.to_numeric(eod_df[coll_col], errors='coerce').fillna(0)
+        nothing_collected = eod_collection <= 0
+    else:
+        logger.warning("CLIENTS NOT PAID: no 'Collection' column — demand after "
+                       "the EOD date is treated as wholly uncollected")
+        nothing_collected = pd.Series(True, index=eod_df.index)
 
     # FTOD = the demand rows the report counts as NOT collected, i.e. the ones
     # still in DPD Group "1-30" (reg_demand - reg_collection). This reproduces
@@ -265,12 +320,16 @@ def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
         # without the report's bucket rule.
         logger.warning("CLIENTS NOT PAID: no 'DPD Group' column — falling back "
                        "to rows with no recorded collection")
-        coll_col = find_column(eod_df, 'Collection')
-        unpaid_at_eod = (
-            pd.to_numeric(eod_df[coll_col], errors='coerce').fillna(0) <= 0
-            if coll_col else pd.Series(True, index=eod_df.index)
-        )
+        unpaid_at_eod = nothing_collected
     ftod_rows = demand_mask & unpaid_at_eod
+
+    # Demand that fell due after the EOD (normally today's). The DPD bucket is
+    # stale for these rows — it was computed before they were due — so only the
+    # workbook's recorded collection can say whether anything came in.
+    today_rows = today_demand_mask & nothing_collected
+
+    # Both segments together are what is still to be collected right now.
+    to_collect_rows = ftod_rows | today_rows
 
     # Accounts already unpaid whose meeting date falls LATER this month. They
     # are outside the report-date window so they are not listed, but the Hourly
@@ -278,51 +337,83 @@ def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
     # = month-end), so the Summary states the number to reconcile the two.
     month_end = first_of_month + pd.offsets.MonthEnd(0)
     later_unpaid = int((
-        (meeting_dt > eod_date) & (meeting_dt <= month_end)
-        & has_demand & unpaid_at_eod
+        (meeting_dt > anchor) & (meeting_dt <= month_end)
+        & has_demand & nothing_collected
     ).sum())
 
     keys = normalise_account_key(eod_df[account_col])
     paid_lookup = set(paid_keys or ())
     is_paid = keys.isin(paid_lookup)
-    paid_mask = ftod_rows & is_paid
-    not_paid_mask = ftod_rows & ~is_paid
+    not_paid_mask = to_collect_rows & ~is_paid
 
     demand_accounts = int(demand_mask.sum())
     ftod_accounts = int(ftod_rows.sum())
     collected_at_eod = demand_accounts - ftod_accounts
-    paid_accounts = int(paid_mask.sum())
+    today_demand_accounts = int(today_demand_mask.sum())
+    today_collected_at_eod = today_demand_accounts - int(today_rows.sum())
+    today_accounts = int(today_rows.sum())
+    to_collect_accounts = int(to_collect_rows.sum())
+    ftod_paid = int((ftod_rows & is_paid).sum())
+    today_paid = int((today_rows & is_paid).sum())
+    paid_accounts = ftod_paid + today_paid
     not_paid_accounts = int(not_paid_mask.sum())
 
+    # The second segment is named by the day (or days) whose demand it holds —
+    # today's date, not the EOD's. Normally the hourly runs the day after the
+    # EOD, so it is a single day; a longer gap is spelt out as a range.
+    day_after_eod = eod_date + pd.Timedelta(days=1)
+    today_label = (
+        f"Demand on {anchor.strftime('%d-%m-%Y')}" if day_after_eod >= anchor
+        else f"Demand {day_after_eod.strftime('%d-%m-%Y')} to {anchor.strftime('%d-%m-%Y')}"
+    )
+
     cols = [c for c in (source_columns or eod_df.columns) if c in eod_df.columns]
-    out_df = eod_df.loc[not_paid_mask, cols]
+    out_df = eod_df.loc[not_paid_mask, cols].copy()
+    # Which segment each listed client came from, so the two are separable in
+    # the output as well as on the Summary sheet.
+    out_df.insert(0, SEGMENT_COL, np.where(
+        ftod_rows.loc[not_paid_mask],
+        f"FTOD up to {eod_date.strftime('%d-%m-%Y')}",
+        today_label,
+    ))
 
     logger.info(
-        "CLIENTS NOT PAID | window %s..%s | Regular Demand: %d | collected at "
-        "EOD: %d | FTOD (not paid at EOD): %d | paid in hourly: %d | NOT PAID: "
-        "%d (%d - %d = %d)",
-        first_of_month.strftime('%d-%m-%Y'), eod_date.strftime('%d-%m-%Y'),
-        demand_accounts, collected_at_eod, ftod_accounts, paid_accounts,
-        not_paid_accounts, ftod_accounts, paid_accounts,
-        ftod_accounts - paid_accounts,
+        "CLIENTS NOT PAID | window %s..%s (EOD %s) | FTOD carry-forward: %d "
+        "(of %d demand) | demand after EOD: %d (of %d) | to collect: %d | paid "
+        "in hourly: %d (%d + %d) | NOT PAID: %d",
+        first_of_month.strftime('%d-%m-%Y'), anchor.strftime('%d-%m-%Y'),
+        eod_date.strftime('%d-%m-%Y'), ftod_accounts, demand_accounts,
+        today_accounts, today_demand_accounts, to_collect_accounts,
+        paid_accounts, ftod_paid, today_paid, not_paid_accounts,
     )
-    if ftod_accounts - paid_accounts != not_paid_accounts:  # defensive; masks are disjoint
+    if to_collect_accounts - paid_accounts != not_paid_accounts:  # defensive; masks are disjoint
         logger.warning("CLIENTS NOT PAID: count identity failed — output may be incomplete")
 
+    # Same wording on the Summary sheet: the segment is named by its own day.
+    after_eod_label = today_label[len('Demand '):]
     summary_rows = [
         ('Hourly report date', anchor.strftime('%d-%m-%Y')),
         ('Hourly report time', report_time or ''),
         ('Latest EOD report date (FTOD measured here)', eod_date.strftime('%d-%m-%Y')),
-        ('Demand window', f"{first_of_month.strftime('%d-%m-%Y')} to {eod_date.strftime('%d-%m-%Y')}"),
+        ('Demand window', f"{first_of_month.strftime('%d-%m-%Y')} to {anchor.strftime('%d-%m-%Y')}"),
         ('', ''),
+        (f"— Up to the EOD ({eod_date.strftime('%d-%m-%Y')}) —", ''),
         ('Regular Demand accounts (report DEMAND)', demand_accounts),
         ('Collected as per latest EOD (report COLLECTION)', collected_at_eod),
         ('FTOD — not paid at latest EOD (report FTOD)', ftod_accounts),
-        ('Not listed: already unpaid, meeting date later this month', later_unpaid),
         ('', ''),
+        (f"— Demand {after_eod_label} —", ''),
+        ('Regular Demand accounts', today_demand_accounts),
+        ('Already collected in the EOD file', today_collected_at_eod),
+        ('Not collected', today_accounts),
+        ('', ''),
+        ('To collect (FTOD + demand ' + after_eod_label + ')', to_collect_accounts),
         ('Paid in Hourly Collection Report', paid_accounts),
-        ('Clients Not Paid (FTOD - paid)', not_paid_accounts),
+        ('   of which FTOD carry-forward', ftod_paid),
+        ('   of which demand ' + after_eod_label, today_paid),
+        ('Clients Not Paid (to collect - paid)', not_paid_accounts),
         ('', ''),
+        ('Not listed: demand due later this month', later_unpaid),
         ('Hourly Collection rows read (after filters)', int(collection_rows)),
         ('Distinct accounts in Hourly Collection', int(collection_accounts)),
         ('Matched on', f"{account_col} (unique account id — names are not used)"),
@@ -340,8 +431,13 @@ def build_clients_not_paid(eod_df, *, account_col, paid_keys, report_date,
         'demandAccounts': demand_accounts,
         'collectedAtEod': collected_at_eod,
         'ftodAccounts': ftod_accounts,
+        'todayDemandAccounts': today_demand_accounts,
+        'todayUnpaidAccounts': today_accounts,
+        'toCollectAccounts': to_collect_accounts,
         'laterUnpaid': later_unpaid,
         'paidAccounts': paid_accounts,
+        'ftodPaidAccounts': ftod_paid,
+        'todayPaidAccounts': today_paid,
         'notPaidAccounts': not_paid_accounts,
-        'columns': len(cols),
+        'columns': len(cols) + 1,  # + the Unpaid Segment tag column
     }

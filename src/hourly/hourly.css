@@ -334,15 +334,21 @@
 }
 
 .hourly-eod-pill {
+  /* `relative` so the remove control (absolutely positioned, shared with the
+     file pickers) anchors to the pill instead of the page. */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 10px 44px 10px 12px;
   margin-bottom: 6px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--success-soft, var(--surface-2));
   font-size: 12.5px;
+}
+.hourly-eod-pill:has(.filedrop-confirm) {
+  padding-right: 190px;
 }
 
 .hourly-date-input {

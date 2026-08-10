@@ -12,7 +12,7 @@ import {
   Play,
   Zap,
 } from "lucide-react";
-import { Button, FileDrop, useToast, Modal } from "../components/ui.jsx";
+import { Button, FileDrop, RemoveButton, useToast, Modal } from "../components/ui.jsx";
 import { syncHourly } from "../growwithme/growwithmeApi.js";
 import {
   saveBackendFile,
@@ -114,7 +114,11 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
 
   // EOD Output manual upload
   async function handleEodOutputUpload(file) {
-    if (!file) return;
+    // Clearing the picker is local — nothing has been sent yet.
+    if (!file) {
+      setFiles((f) => ({ ...f, eodOutput: null }));
+      return;
+    }
     setBusy("upload-eod");
     try {
       const res = await saveBackendFile("eodOutput", file);
@@ -132,10 +136,31 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
   }
 
   function handleCollectionUpload(file) {
-    if (!file) return;
+    // null = the user cleared the pick; drop it so another file can be chosen.
+    if (!file) {
+      setFiles((f) => ({ ...f, collection: null }));
+      return;
+    }
     setFiles((f) => ({ ...f, collection: file }));
     setUseGDriveCollection(false);
     toast.success(`Collection Report ready: ${file.name}`, "Loaded");
+  }
+
+  // Delete the EOD Output uploaded here, so a different one can be uploaded.
+  // Only offered for a manual upload — a file that came from the EOD run is
+  // that run's own output and is left alone.
+  async function handleRemoveEodOutput() {
+    setBusy("remove-eod");
+    try {
+      const res = await deleteBackendFile("eodOutput");
+      toast.success(res?.message || "EOD Output removed.", "Removed");
+      setFiles((f) => ({ ...f, eodOutput: null }));
+      refreshStatus();
+    } catch (e) {
+      toast.error(e.message, "Remove failed");
+    } finally {
+      setBusy("");
+    }
   }
 
   // Google Drive
@@ -366,6 +391,15 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
                 {status?.backend?.eodOutputSource === "eod-auto" ? " — from your EOD run" : " — uploaded"}
                 {status?.backend?.eodOutput ? ` · ${status.backend.eodOutput}` : ""}
               </span>
+              {/* Only an uploaded file can be removed here; one produced by the
+                  EOD run belongs to that run. */}
+              {status?.backend?.eodOutputSource !== "eod-auto" && (
+                <RemoveButton
+                  onRemove={handleRemoveEodOutput}
+                  removing={busy === "remove-eod"}
+                  label="Remove the uploaded EOD Output"
+                />
+              )}
             </div>
           ) : (
             <div className="hourly-field">
@@ -539,8 +573,10 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
                         <strong>Clients_Not_Paid.xlsx</strong>
                         <span>
                           {report.clientsNotPaid.notPaid.toLocaleString()} clients ·{" "}
-                          EOD FTOD {report.clientsNotPaid.ftod.toLocaleString()} −{" "}
-                          {report.clientsNotPaid.paid.toLocaleString()} paid this hour
+                          EOD FTOD {report.clientsNotPaid.ftod.toLocaleString()} +{" "}
+                          {report.clientsNotPaid.todayDemand.toLocaleString()} due since
+                          {" "}−{" "}
+                          {report.clientsNotPaid.paid.toLocaleString()} paid so far
                         </span>
                       </div>
                       <a

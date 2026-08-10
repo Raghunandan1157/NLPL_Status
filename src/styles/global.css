@@ -576,6 +576,18 @@ button {
   gap: 10px;
   z-index: 1000;
   max-width: 380px;
+  /* Toasts are sticky now, so several can be on screen at once. Keep the stack
+     inside the viewport and let it scroll rather than running off the top —
+     a long sync message is tall on its own. */
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* The wrap is only as wide as its toasts; without this the invisible
+     scroll gutter would swallow clicks on the page behind it. */
+  pointer-events: none;
+}
+.toast-wrap > * {
+  pointer-events: auto;
 }
 .toast {
   display: flex;
@@ -587,6 +599,9 @@ button {
   border-radius: 12px;
   padding: 13px 15px;
   box-shadow: var(--shadow-lg);
+  /* In a scrolling column, flex would otherwise squash the older toasts
+     instead of scrolling them. */
+  flex-shrink: 0;
   animation: toastIn 0.25s ease;
 }
 @keyframes toastIn {
@@ -698,6 +713,96 @@ button {
 }
 
 /* File drop */
+/* Wrapper so the "remove file" button can sit over the drop zone without being
+   nested inside it (a button inside a button is invalid HTML). */
+.filedrop-wrap {
+  position: relative;
+  min-width: 0;
+}
+/* Keep the filename clear of the X. */
+.filedrop-wrap .filedrop.ready {
+  padding-right: 44px;
+}
+.filedrop-clear {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted, #64748b);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.filedrop-clear:hover {
+  color: #dc2626;
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+.filedrop-clear:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* Confirm strip shown in place of the X when the file being removed is one the
+   backend actually holds — deleting it is not undoable, so it asks first. */
+.filedrop-confirm {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 1px solid #fecaca;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  white-space: nowrap;
+}
+.filedrop-confirm button {
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.filedrop-confirm-yes {
+  background: #dc2626;
+  color: #fff;
+}
+.filedrop-confirm-yes:hover:not(:disabled) {
+  background: #b91c1c;
+}
+.filedrop-confirm-no {
+  background: var(--surface-2);
+  color: var(--text, #0f172a);
+  border-color: var(--border-strong);
+}
+.filedrop-confirm button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+/* Keep the text clear of whichever control is showing — the X, or the wider
+   confirm strip. Covers the locked card too, which is a div, not a button. */
+.filedrop-wrap:has(.filedrop-clear) .filedrop {
+  padding-right: 44px;
+}
+.filedrop-wrap:has(.filedrop-confirm) .filedrop {
+  padding-right: 190px;
+}
+
 .filedrop {
   display: flex;
   align-items: center;

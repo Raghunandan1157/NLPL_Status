@@ -81,6 +81,31 @@ def backend_status():
     return jsonify({'exists': False, 'filename': None, 'rowCount': 0})
 
 
+@db_bp.route('/delete-backend', methods=['POST'])
+def delete_backend():
+    """Remove the stored backend reference file so a new one can be uploaded."""
+    removed = []
+    for ext in ('xlsx', 'csv'):
+        path = config.DB_DIR / ('backend_data.' + ext)
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError as e:
+            return jsonify({
+                'error': f'Could not delete {path.name}: {e}',
+                'suggestion': 'Close the file if it is open, then try again.',
+            }), 409
+
+    return jsonify({
+        'success': True,
+        'removed': removed,
+        'message': (f"Removed {', '.join(removed)}. Upload a new reference file."
+                    if removed else 'Nothing to remove — no reference file was stored.'),
+    })
+
+
 @db_bp.route('/backend-data')
 def backend_data():
     """Return the parsed lookup table (BranchID → Region/RM/Area/DM)."""

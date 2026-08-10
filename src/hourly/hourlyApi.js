@@ -15,6 +15,16 @@ export function saveHourlyDaily(file) {
   return requestJson("/hourly/save-hourly-daily", { method: "POST", body: fd });
 }
 
+/** Delete the EOD Output uploaded here (and its parquet cache) so a different
+ *  one can be uploaded. A copy that came from an EOD run is left alone. */
+export function deleteBackendFile(type = "eodOutput") {
+  return requestJson("/hourly/delete-backend-file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+}
+
 export function saveBackendFile(type, file) {
   const fd = new FormData();
   fd.append("type", type);
@@ -42,7 +52,8 @@ export const cacheCollectionGdrive = () => requestJson("/hourly/cache-collection
  * VBA bundle) and discard the body.
  *
  * @returns {Promise<{filename: string, accountIdField: string,
- *                    clientsNotPaid: {notPaid, ftod, paid}|null}>}
+ *                    clientsNotPaid: {notPaid, ftod, todayDemand, toCollect,
+ *                                     paid}|null}>}
  */
 export async function processHourly({ files, options }) {
   const fd = new FormData();
@@ -100,6 +111,8 @@ export async function processHourly({ files, options }) {
       : {
           notPaid: Number(notPaidHeader) || 0,
           ftod: Number(response.headers.get("X-Ftod-Count")) || 0,
+          todayDemand: Number(response.headers.get("X-Today-Demand-Count")) || 0,
+          toCollect: Number(response.headers.get("X-To-Collect-Count")) || 0,
           paid: Number(response.headers.get("X-Paid-Count")) || 0,
         };
 

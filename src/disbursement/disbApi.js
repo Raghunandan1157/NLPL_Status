@@ -20,6 +20,9 @@ export function uploadBackend(file) {
   return requestJson("/db/upload-backend", { method: "POST", body: fd });
 }
 
+/** Delete the stored reference file so a different one can be uploaded. */
+export const deleteBackend = () => requestJson("/db/delete-backend", { method: "POST" });
+
 /* ----------------------------------------------------- processed output */
 export function uploadProcessed(blob, name, targetDate) {
   const fd = new FormData();

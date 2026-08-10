@@ -772,6 +772,118 @@ def cache_file_endpoint():
         }), 500
 
 
+# ---------------------------------------------------------------------------
+# Daily PAR sanity checks
+# ---------------------------------------------------------------------------
+# The daily PAR supplies "DPD Group" / "DPD Days" (the CURRENT delinquency
+# bucket); the Backend-Data Last Month PAR supplies "DPD Group - Last Month" /
+# "Loan Status - Last Month".  When the month-end PAR is uploaded as the daily
+# PAR too, both come from the same snapshot and the report silently degrades:
+#   · no current-month row is in the "1: 1-30" bucket, so Regular Collection ==
+#     Regular Demand, FTOD == 0 and Collection % == 100% on every single row;
+#   · "DPD Group" is never blank, so NPA CLOSURE collapses to 0 and NPA
+#     ACTIVATION absorbs those accounts instead.
+# Nothing errors out — the numbers just come out wrong — so guard the inputs.
+
+import re as _re_par
+
+_PAR_FILENAME_DATE_RE = _re_par.compile(r'(?<!\d)(\d{2})[\-_./](\d{2})[\-_./](\d{4})(?!\d)')
+
+
+def _file_fingerprint(path):
+    """(size, md5 of first 1 MB) — cheap identity check for large xlsx files."""
+    p = Path(path)
+    hasher = hashlib.md5()
+    with open(p, 'rb') as f:
+        hasher.update(f.read(1024 * 1024))
+    return p.stat().st_size, hasher.hexdigest()
+
+
+def _filename_date(name):
+    """Parse a DD-MM-YYYY stamp out of an uploaded filename, else None.
+
+    Returns the LATEST date in the name, so a range like
+    "PAR 31-07-2026 to 03-08-2026.xlsx" is judged on its end date.
+    """
+    found = []
+    for m in _PAR_FILENAME_DATE_RE.finditer(Path(name or '').name):
+        try:
+            found.append(datetime.strptime(
+                f"{m.group(1)}-{m.group(2)}-{m.group(3)}", '%d-%m-%Y'))
+        except ValueError:
+            continue
+    return max(found) if found else None
+
+
+def _check_daily_par(par_path, par_name, target_date):
+    """Return an error string when the daily PAR is not a PAR for target_date.
+
+    Two independent checks:
+      1. The uploaded daily PAR is the very same file as the staged Last Month
+         PAR (identical size + head hash) — the exact mix-up described above.
+      2. The daily PAR filename carries an "as on DD-MM-YYYY" date that falls
+         before the first of target_date's month — a stale / month-end PAR.
+    Returns None when the PAR looks usable.
+    """
+    if not target_date:
+        return None
+
+    try:
+        last_month_files = sorted(BACKEND_DATA_DIR.glob("Last_Month_PAR_*"))
+        if last_month_files:
+            if _file_fingerprint(par_path) == _file_fingerprint(last_month_files[0]):
+                return (
+                    "The daily PAR you uploaded is the same file as the Backend-Data "
+                    f"Last Month PAR ({last_month_files[0].name}). Both the current and "
+                    "the last-month DPD buckets would then come from one snapshot, which "
+                    "forces Regular Collection to equal Regular Demand (FTOD 0, "
+                    "Collection % 100) and zeroes NPA Closure. Upload the PAR for "
+                    f"{target_date.strftime('%d-%m-%Y')} instead."
+                )
+    except OSError as e:
+        logging.warning(f"Daily PAR identity check skipped: {e}")
+
+    par_date = _filename_date(par_name)
+    if par_date and par_date < target_date.replace(day=1):
+        return (
+            f"The daily PAR is dated {par_date.strftime('%d-%m-%Y')} but the report date "
+            f"is {target_date.strftime('%d-%m-%Y')}. A PAR from before "
+            f"{target_date.strftime('01-%m-%Y')} has no current-month delinquency, so "
+            "Regular Collection would equal Regular Demand on every row. Upload the "
+            "PAR for the report date."
+        )
+    return None
+
+
+def _stale_par_data_warning(df):
+    """Warn when the merged data shows current == last-month DPD on every row.
+
+    Backstop for _check_daily_par: catches a re-saved / renamed copy of the
+    month-end PAR that slips past the fingerprint and filename checks.
+    """
+    try:
+        if df is None or 'DPD Group' not in df.columns or 'DPD Group - Last Month' not in df.columns:
+            return None
+        cur = df['DPD Group'].astype('string').str.strip()
+        last = df['DPD Group - Last Month'].astype('string').str.strip()
+        comparable = cur.notna() & last.notna()
+        total = int(comparable.sum())
+        if total < 1000:
+            return None
+        same_pct = 100.0 * int((comparable & (cur == last)).sum()) / total
+        if same_pct < 99.9:
+            return None
+        return (
+            f"Current DPD Group matches DPD Group - Last Month on {same_pct:.2f}% of "
+            f"{total:,} accounts — the daily PAR looks like the month-end PAR. "
+            "Regular Collection, FTOD, Collection % and NPA Activation/Closure in this "
+            "report are not reliable. Re-run with the PAR for the report date."
+        )
+    except Exception as e:  # never let a sanity check break a run
+        logging.warning(f"Stale-PAR data check skipped: {e}")
+        return None
+
+
 @eod_bp.route('/process', methods=['POST'])
 @require_api_key
 def process_files_endpoint():
@@ -883,6 +995,45 @@ def process_files_endpoint():
                 par.save(par_path)
                 collection.save(collection_path)
 
+            # Authoritative EOD date: the Collection's own latest transaction
+            # date (max Trxdate) IS the uploaded data's date. This drives the
+            # OverAll "as on" label + data window AND the on-date Today/Tomorrow,
+            # so everything reflects the files you uploaded. Overrides the
+            # filename guess above. Resolved here (before the Last Cache copies
+            # are written) so the daily-PAR sanity check below can compare the
+            # PAR against the real report date and abort without polluting the
+            # cache with a bad upload.
+            try:
+                from services.eod_processor import parse_trxdate
+                _coll_dates = smart_read_excel(collection_path, usecols=['Trxdate'])
+                _coll_dates['Trxdate'] = parse_trxdate(_coll_dates['Trxdate'])
+                _coll_max = _coll_dates['Trxdate'].dropna().max()
+                if pd.notna(_coll_max):
+                    _dd = pd.Timestamp(_coll_max)
+                    target_date = datetime(_dd.year, _dd.month, _dd.day)
+                    logging.info(f"EOD target_date from Collection Trxdate (data date): "
+                                 f"{target_date.strftime('%d-%m-%Y')}")
+            except Exception as _date_err:
+                logging.warning(f"Collection Trxdate date-detect skipped: {_date_err}")
+            if target_date is None:
+                target_date = datetime.now()
+                logging.info(f"EOD target_date fallback to today: {target_date.strftime('%d-%m-%Y')}")
+
+            # Reject a daily PAR that isn't a PAR for the report date — it would
+            # produce a report that looks complete but has Regular Collection ==
+            # Regular Demand everywhere. Overridable with allowStalePar=true.
+            if not use_last_cache and request.form.get('allowStalePar') != 'true':
+                _par_problem = _check_daily_par(
+                    par_path, par.filename if par else '', target_date)
+                if _par_problem:
+                    logging.error(f"EOD aborted — daily PAR check failed: {_par_problem}")
+                    return jsonify({
+                        'error': _par_problem,
+                        'code': 'STALE_PAR',
+                        'suggestion': 'Upload the PAR for the report date, or re-run '
+                                      'with the override if this is intentional.',
+                    }), 400
+
             # Always save full Excel copies for "Last Cache" quick-reload
             if not use_last_cache:
                 try:
@@ -913,27 +1064,6 @@ def process_files_endpoint():
                 demand_path = temp_path / "demand.xlsx"
                 demand.save(demand_path)
 
-            # Authoritative EOD date: the Collection's own latest transaction
-            # date (max Trxdate) IS the uploaded data's date. This drives the
-            # OverAll "as on" label + data window AND the on-date Today/Tomorrow,
-            # so everything reflects the files you uploaded. Overrides the
-            # filename guess above.
-            try:
-                from services.eod_processor import parse_trxdate
-                _coll_dates = smart_read_excel(collection_path, usecols=['Trxdate'])
-                _coll_dates['Trxdate'] = parse_trxdate(_coll_dates['Trxdate'])
-                _coll_max = _coll_dates['Trxdate'].dropna().max()
-                if pd.notna(_coll_max):
-                    _dd = pd.Timestamp(_coll_max)
-                    target_date = datetime(_dd.year, _dd.month, _dd.day)
-                    logging.info(f"EOD target_date from Collection Trxdate (data date): "
-                                 f"{target_date.strftime('%d-%m-%Y')}")
-            except Exception as _date_err:
-                logging.warning(f"Collection Trxdate date-detect skipped: {_date_err}")
-            if target_date is None:
-                target_date = datetime.now()
-                logging.info(f"EOD target_date fallback to today: {target_date.strftime('%d-%m-%Y')}")
-
             # Process using the imported logic (returns DataFrame + report path)
             # sheets_dir=None: skip inline sheet extraction (saves ~15-20s)
             # Individual sheets are extracted in a background thread below.
@@ -954,6 +1084,16 @@ def process_files_endpoint():
                     'error': 'Processing completed but produced no results. Check input files.',
                     'suggestion': 'Verify that your PAR, Collection, and Demand files contain valid data.'
                 }), 500
+
+            # Backstop for the pre-flight PAR check: a renamed copy of the
+            # month-end PAR passes the fingerprint/filename tests but still makes
+            # current DPD == last-month DPD on every row. Surface it rather than
+            # ship silently-wrong Regular/NPA numbers.
+            run_warnings = []
+            _stale_warning = _stale_par_data_warning(df_result)
+            if _stale_warning:
+                logging.error(f"EOD data check: {_stale_warning}")
+                run_warnings.append(_stale_warning)
 
             # Invalidate employee merged DF cache (full flush -- demand data changed)
             invalidate_merged_df_cache()
@@ -1085,6 +1225,8 @@ def process_files_endpoint():
                 'available': available,
                 'message': 'Processing complete. Choose which file to download.'
             }
+            if run_warnings:
+                result['warnings'] = run_warnings
 
             return jsonify(result)
 
@@ -1761,6 +1903,95 @@ def save_backend_file():
             'error': err['user_message'],
             'suggestion': err['suggestion'],
         }), 500
+
+
+@eod_bp.route('/delete-backend-file', methods=['POST'])
+@require_api_key
+def delete_backend_file():
+    """Remove a saved master file so a different one can be uploaded.
+
+    Deletes the saved workbook only. Anything already ingested into DuckDB
+    stays — the tables are managed from the DB Module (Save to DB / Clear DB),
+    and silently dropping them here would break runs that rely on them.
+    """
+    payload = request.get_json(silent=True) or {}
+    file_type = payload.get('type') or request.form.get('type')
+
+    prefixes = {
+        'masterDemand': 'Demand_Sheet_Master_',
+        'lastMonthPar': 'Last_Month_PAR_',
+    }
+    if file_type not in prefixes:
+        return jsonify({'error': 'Invalid file type'}), 400
+
+    try:
+        removed = []
+        for existing in BACKEND_DATA_DIR.glob(f"{prefixes[file_type]}*"):
+            existing.unlink()
+            removed.append(existing.name)
+            logging.info(f"Deleted backend file: {existing}")
+
+        if not removed:
+            return jsonify({'success': True, 'removed': [],
+                            'message': 'Nothing to remove — no file was saved.'})
+        return jsonify({
+            'success': True,
+            'removed': removed,
+            'message': f"Removed {', '.join(removed)}. Upload a new file to replace it.",
+        })
+    except Exception as e:
+        err = user_error(e, context='eod-delete-backend')
+        return jsonify({'error': err['user_message'], 'suggestion': err['suggestion']}), 500
+
+
+@eod_bp.route('/delete-cache', methods=['POST'])
+def delete_cache_endpoint():
+    """Drop the cached PAR / Collection copies so the next run uses fresh uploads.
+
+    Removes the kept Excel copy, its parquet cache and the name marker for the
+    requested type ('par', 'collection', or 'all'). The cache history CSV is
+    left alone — it is a log of past runs, not an input.
+    """
+    payload = request.get_json(silent=True) or {}
+    file_type = payload.get('type') or request.form.get('type') or 'all'
+    if file_type not in ('par', 'collection', 'all'):
+        return jsonify({'error': 'Invalid file type'}), 400
+
+    types = ['par', 'collection'] if file_type == 'all' else [file_type]
+    removed, failed = [], []
+    for t in types:
+        targets = [
+            DB_CACHE_DIR / f"daily_{t}_last.xlsx",
+            DB_CACHE_DIR / f"daily_{t}_last.meta.json",
+        ]
+        targets += list(DB_CACHE_DIR.glob(f"daily_{t}_cache_*.parquet"))
+        for target in targets:
+            if not target.exists():
+                continue
+            try:
+                target.unlink()
+                removed.append(target.name)
+                logging.info(f"Deleted cached {t} file: {target}")
+            except OSError as e:
+                # A file held open by Excel must not take the whole call down.
+                failed.append(target.name)
+                logging.warning(f"Could not delete {target}: {e}")
+
+    if failed:
+        return jsonify({
+            'success': False,
+            'removed': removed,
+            'failed': failed,
+            'error': f"Could not delete: {', '.join(failed)}",
+            'suggestion': 'Close the file if it is open in Excel, then try again.',
+        }), 409
+
+    return jsonify({
+        'success': True,
+        'removed': removed,
+        'message': (f"Cleared {len(removed)} cached file(s). Upload today's files to continue."
+                    if removed else 'Nothing to clear — no cache was stored.'),
+    })
 
 
 @eod_bp.route('/backend-files-status', methods=['GET'])

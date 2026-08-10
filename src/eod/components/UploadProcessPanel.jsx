@@ -21,6 +21,7 @@ import { Button, FileDrop, Switch, useToast } from "../../components/ui.jsx";
 import { todayDMY } from "../../lib/format.js";
 import {
   cacheFile,
+  deleteCache,
   generateDailyHourlyReport,
   generateEmployeeReport,
   processEod,
@@ -77,6 +78,24 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
 
   const pushLog = (text, tone = "info") => job.log(text, tone);
 
+  // Drop a cached PAR / Collection copy. The cache is what "Use cached data"
+  // runs on, so being unable to clear it means being stuck with yesterday's
+  // file; after removing, the panel falls back to the upload pickers.
+  async function handleClearCache(type) {
+    setBusy(`clear-${type}`);
+    try {
+      const res = await deleteCache(type);
+      toast.success(res.message || `Cached ${type} cleared.`, "Cache cleared");
+      pushLog(`Cached ${type.toUpperCase()} cleared.`, "info");
+      setUseCache(false);
+      refreshStatus();
+    } catch (e) {
+      toast.error(e.message, "Could not clear the cache");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function handleCache(type) {
     const file = files[type];
     if (!file) return;
@@ -93,7 +112,10 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
     }
   }
 
-  async function handleProcess() {
+  // `opts` is only ever set by the STALE_PAR retry below — call sites that wire
+  // this to onClick/onRetry pass an event, so read the flag defensively.
+  async function handleProcess(opts) {
+    const allowStalePar = opts?.allowStalePar === true;
     if (!canProcess) return;
     try {
       const out = await job.run(async ({ processId, signal }) => {
@@ -104,6 +126,7 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
           cachePar: true,
           cacheCollection: true,
           autoFixSheets: false,
+          allowStalePar,
           processId,
           signal,
         };
@@ -113,6 +136,12 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
           err.cancelled = true;
           throw err;
         }
+        // The daily PAR passed the pre-flight checks but the merged data still
+        // shows current DPD == last-month DPD: the numbers are not reliable.
+        (payload.warnings || []).forEach((w) => {
+          toast.error(w, "Check the PAR file");
+          pushLog(w, "error");
+        });
         toast.success(payload.message || "Processing complete.", "EOD complete");
         // Archive both reports under this date for the Reports & Downloads page.
         snapshotReports(requestOptions.targetDate).catch(() => {});
@@ -124,7 +153,17 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
       // Focus the Reports & Downloads tab after a successful run.
       if (onSwitchTab) setTimeout(() => onSwitchTab("reports"), 600);
     } catch (e) {
-      if (!e?.cancelled) toast.error(e.message, "Processing failed");
+      if (e?.cancelled) return;
+      // Wrong daily PAR — offer to run anyway rather than silently blocking.
+      if (e?.payload?.code === "STALE_PAR" && !allowStalePar) {
+        pushLog(e.message, "error");
+        if (window.confirm(`${e.message}\n\nRun anyway with this PAR?`)) {
+          return handleProcess({ allowStalePar: true });
+        }
+        toast.error("Processing stopped — upload the PAR for the report date.", "Wrong PAR file");
+        return;
+      }
+      toast.error(e.message, "Processing failed");
     }
   }
 
@@ -208,6 +247,9 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
                 locked
                 lockedText="Using cached PAR Report"
                 hint={status?.lastCache?.par?.name || status?.lastCache?.par?.originalName || "Cached PAR"}
+                onRemove={() => handleClearCache("par")}
+                removing={busy === "clear-par"}
+                removeLabel="Clear the cached PAR and upload a new one"
               />
             ) : (
               <FileDrop
@@ -223,6 +265,9 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
                 locked
                 lockedText="Using cached Collection Report"
                 hint={status?.lastCache?.collection?.name || status?.lastCache?.collection?.originalName || "Cached Collection"}
+                onRemove={() => handleClearCache("collection")}
+                removing={busy === "clear-collection"}
+                removeLabel="Clear the cached Collection and upload a new one"
               />
             ) : (
               <FileDrop

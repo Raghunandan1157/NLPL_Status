@@ -30,6 +30,25 @@ export function saveBackendFile(type, file, { ingest = true } = {}) {
   return requestJson("/eod/save-backend-file", { method: "POST", body: fd });
 }
 
+/** Delete a saved master file (masterDemand | lastMonthPar) so it can be replaced.
+ *  Only the file is removed — DuckDB tables are managed from the DB Module. */
+export function deleteBackendFile(type) {
+  return requestJson("/eod/delete-backend-file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+}
+
+/** Clear the cached PAR / Collection copies ("par" | "collection" | "all"). */
+export function deleteCache(type = "all") {
+  return requestJson("/eod/delete-cache", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+}
+
 export function ingestSingleToDb(type) {
   return requestJson("/eod/ingest-single-to-db", {
     method: "POST",
@@ -56,6 +75,9 @@ export function processEod({ files, options }) {
   fd.append("cachePar", String(options.cachePar));
   fd.append("cacheCollection", String(options.cacheCollection));
   fd.append("autoFixSheets", String(options.autoFixSheets));
+  // Bypass the daily-PAR sanity check (same file as Last Month PAR / dated
+  // before the report month). Only set after the user confirms the override.
+  if (options.allowStalePar) fd.append("allowStalePar", "true");
   if (options.processId) fd.append("processId", options.processId);
   return requestJson("/eod/process", { method: "POST", body: fd, signal: options.signal });
 }

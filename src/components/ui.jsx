@@ -53,6 +53,9 @@ export class ErrorBoundary extends Component {
 /* ------------------------------------------------------------------ Toasts */
 const ToastContext = createContext(null);
 
+// Sticky toasts never expire on their own, so the stack needs a ceiling.
+const MAX_TOASTS = 6;
+
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const idRef = useRef(0);
@@ -61,11 +64,24 @@ export function ToastProvider({ children }) {
     setToasts((list) => list.filter((t) => t.id !== id));
   }, []);
 
+  const clear = useCallback(() => setToasts([]), []);
+
+  // Toasts DO NOT auto-dismiss. A sync result is often the only record of what
+  // happened — "323 rows · Customer details FAILED (413)" is exactly the kind of
+  // message that used to vanish after 4.5s while the user was still reading it.
+  // They stay until the user closes one, switches page, or refreshes.
+  // Pass an explicit `duration` (ms) to opt a single toast back into auto-hide.
   const push = useCallback(
     (toast) => {
       const id = ++idRef.current;
-      const item = { id, type: "info", duration: 4500, ...toast };
-      setToasts((list) => [...list, item]);
+      const item = { id, type: "info", duration: null, ...toast };
+      setToasts((list) => {
+        const next = [...list, item];
+        // Nothing expires on its own now, so cap the stack — otherwise a long
+        // session grows past the viewport and buries the newest message.
+        // Oldest go first; the newest is always the one on screen.
+        return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
+      });
       if (item.duration) setTimeout(() => dismiss(id), item.duration);
       return id;
     },
@@ -75,8 +91,9 @@ export function ToastProvider({ children }) {
   const api = {
     push,
     dismiss,
+    clear,
     success: (message, title) => push({ type: "success", message, title }),
-    error: (message, title) => push({ type: "error", message, title, duration: 7000 }),
+    error: (message, title) => push({ type: "error", message, title }),
     info: (message, title) => push({ type: "info", message, title }),
     warn: (message, title) => push({ type: "warn", message, title }),
   };
@@ -170,58 +187,178 @@ export function ProgressBar({ value, done }) {
 }
 
 /* ---------------------------------------------------------------- FileDrop */
-export function FileDrop({ label, hint, file, onFile, accept = ".xlsx,.xls,.xlsm", disabled, locked, lockedText }) {
-  const inputRef = useRef(null);
-  const [drag, setDrag] = useState(false);
+/* ------------------------------------------------------------ RemoveButton */
+/**
+ * Delete control for a file the backend is already holding: an X that turns
+ * into a "Remove / Cancel" strip in place. Deleting a stored file is not
+ * undoable, so it always asks first — but on the card itself, so there is no
+ * dialog to lose behind a window and Cancel is a single click.
+ *
+ * Used by FileDrop, and directly wherever a stored file is shown as something
+ * other than a drop zone (status pills and the like).
+ */
+export function RemoveButton({ onRemove, removing, label = "Remove this file" }) {
+  const [confirming, setConfirming] = useState(false);
 
-  if (locked) {
+  if (!confirming) {
     return (
-      <div className="filedrop locked" title={hint || lockedText || "Using backend data"}>
-        <span className="filedrop-icon ok">
-          <CheckCircle2 size={22} />
-        </span>
-        <div className="filedrop-text">
-          <strong title={lockedText || "Using backend data"}>{lockedText || "Using backend data"}</strong>
-          <small title={hint}>{hint}</small>
-        </div>
-      </div>
+      <button
+        type="button"
+        className="filedrop-clear"
+        title={label}
+        aria-label={label}
+        disabled={removing}
+        onClick={() => setConfirming(true)}
+      >
+        {removing ? <Loader2 size={13} className="spin" /> : <X size={15} />}
+      </button>
     );
   }
 
   return (
-    <button
-      type="button"
-      className={`filedrop ${file ? "ready" : ""} ${drag ? "drag" : ""}`}
-      disabled={disabled}
-      onClick={() => inputRef.current?.click()}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDrag(true);
-      }}
-      onDragLeave={() => setDrag(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDrag(false);
-        const f = e.dataTransfer.files?.[0];
-        if (f) onFile(f);
-      }}
-      title={file ? file.name : undefined}
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        accept={accept}
-        hidden
-        onChange={(e) => onFile(e.target.files?.[0] || null)}
-      />
-      <span className="filedrop-icon">
-        <FileSpreadsheet size={22} />
-      </span>
-      <div className="filedrop-text">
-        <strong title={file ? file.name : label}>{file ? file.name : label}</strong>
-        <small>{file ? `${fileSizeMB(file.size)} · ready` : hint}</small>
+    <div className="filedrop-confirm">
+      <span>Remove?</span>
+      <button
+        type="button"
+        className="filedrop-confirm-yes"
+        disabled={removing}
+        onClick={async () => {
+          try {
+            await onRemove();
+          } finally {
+            setConfirming(false);
+          }
+        }}
+      >
+        {removing ? <Loader2 size={13} className="spin" /> : "Remove"}
+      </button>
+      <button
+        type="button"
+        className="filedrop-confirm-no"
+        disabled={removing}
+        onClick={() => setConfirming(false)}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+/**
+ * File picker with a built-in remove control.
+ *
+ * Two kinds of file, two behaviours — a file the user has only *selected* is
+ * cleared instantly (nothing has happened yet), while a file already saved on
+ * the backend is deleted only after an in-place confirm, because that is a real
+ * deletion other runs depend on.
+ *
+ * @param onFile    receives the picked File, and `null` when the user clears a
+ *                  staged pick. Handlers must accept null.
+ * @param onRemove  optional async delete of the file already on the backend.
+ *                  Supplying it puts a remove control on the card — including
+ *                  the `locked` variant, which otherwise has no way back.
+ * @param removing  true while that delete is in flight (shows a spinner).
+ */
+export function FileDrop({
+  label,
+  hint,
+  file,
+  onFile,
+  accept = ".xlsx,.xls,.xlsm",
+  disabled,
+  locked,
+  lockedText,
+  onRemove,
+  removing,
+  removeLabel = "Remove this file",
+}) {
+  const inputRef = useRef(null);
+  const [drag, setDrag] = useState(false);
+
+  const removeControl = onRemove ? (
+    <RemoveButton onRemove={onRemove} removing={removing} label={removeLabel} />
+  ) : null;
+
+  if (locked) {
+    return (
+      <div className="filedrop-wrap">
+        <div
+          className={`filedrop locked ${removeControl ? "ready" : ""}`}
+          title={hint || lockedText || "Using backend data"}
+        >
+          <span className="filedrop-icon ok">
+            <CheckCircle2 size={22} />
+          </span>
+          <div className="filedrop-text">
+            <strong title={lockedText || "Using backend data"}>{lockedText || "Using backend data"}</strong>
+            <small title={hint}>{hint}</small>
+          </div>
+        </div>
+        {removeControl}
       </div>
-    </button>
+    );
+  }
+
+  // The clear control is a SIBLING of the drop button, not a child — a <button>
+  // inside a <button> is invalid HTML and browsers drop the inner one.
+  return (
+    <div className="filedrop-wrap">
+      <button
+        type="button"
+        className={`filedrop ${file ? "ready" : ""} ${drag ? "drag" : ""}`}
+        disabled={disabled}
+        onClick={() => inputRef.current?.click()}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDrag(true);
+        }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDrag(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) onFile(f);
+        }}
+        title={file ? file.name : undefined}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept={accept}
+          hidden
+          // Reset the input's value on every pick so choosing the SAME file again
+          // after clearing still fires onChange (the browser suppresses it when
+          // the value is unchanged).
+          onChange={(e) => {
+            const f = e.target.files?.[0] || null;
+            e.target.value = "";
+            onFile(f);
+          }}
+        />
+        <span className="filedrop-icon">
+          <FileSpreadsheet size={22} />
+        </span>
+        <div className="filedrop-text">
+          <strong title={file ? file.name : label}>{file ? file.name : label}</strong>
+          <small>{file ? `${fileSizeMB(file.size)} · ready` : hint}</small>
+        </div>
+      </button>
+
+      {/* A staged pick is cleared straight away — nothing has been saved yet.
+          A backend file goes through onRemove's confirm instead. */}
+      {removeControl}
+      {!removeControl && file && !disabled ? (
+        <button
+          type="button"
+          className="filedrop-clear"
+          title="Remove this file"
+          aria-label={`Remove ${file.name}`}
+          onClick={() => onFile(null)}
+        >
+          <X size={15} />
+        </button>
+      ) : null}
+    </div>
   );
 }
 

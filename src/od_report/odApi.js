@@ -14,6 +14,14 @@ function uploadStaged(path, file) {
 export const uploadOd = (file) => uploadStaged("/od-report/upload-od", file);
 export const uploadIns = (file) => uploadStaged("/od-report/upload-ins", file);
 
+/** Remove a staged optional input ("od" | "ins") so it can be re-uploaded. */
+export const deleteStaged = (type) =>
+  requestJson("/od-report/delete-staged", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+
 /**
  * POST the PAR file and consume the OD Report SSE step stream. Calls
  * onEvent(parsed) for each `data: {...}` event (step / done / error).

@@ -296,6 +296,72 @@ def save_backend_file():
         }), 500
 
 
+@hourly_bp.route('/delete-backend-file', methods=['POST'])
+def delete_backend_file():
+    """Remove the uploaded EOD Output so a different one can be uploaded.
+
+    Only the manually uploaded copy in BACKEND_DATA_DIR is removed, together
+    with its parquet cache (which is keyed on the file and would otherwise be
+    read instead of the next upload). A copy that arrived in the archive from an
+    EOD run is left alone — it is that run's own output, and any file uploaded
+    here takes precedence over it anyway.
+    """
+    payload = request.get_json(silent=True) or {}
+    file_type = payload.get('type') or request.form.get('type') or 'eodOutput'
+    if file_type != 'eodOutput':
+        return jsonify({'error': 'Invalid file type'}), 400
+
+    try:
+        removed, failed = [], []
+        for existing in config.BACKEND_DATA_DIR.glob('EOD_Output_*'):
+            try:
+                existing.unlink()
+                removed.append(existing.name)
+                logger.info(f"Deleted uploaded EOD Output: {existing}")
+            except OSError as e:
+                failed.append(existing.name)
+                logger.warning(f"Could not delete {existing}: {e}")
+
+        # The cache mirrors whatever file was there; leaving it would keep
+        # serving the deleted workbook's rows.
+        for cache in config.DB_CACHE_DIR.glob('hourly_eod_cache_*.parquet'):
+            try:
+                cache.unlink()
+                logger.info(f"Deleted EOD Output cache: {cache.name}")
+            except OSError as e:
+                logger.warning(f"Could not delete cache {cache}: {e}")
+
+        if failed:
+            return jsonify({
+                'success': False,
+                'removed': removed,
+                'failed': failed,
+                'error': f"Could not delete: {', '.join(failed)}",
+                'suggestion': 'Close the file if it is open in Excel, then try again.',
+            }), 409
+
+        if not removed:
+            archive_path, source = _find_eod_output()
+            if archive_path and source == 'archive':
+                return jsonify({
+                    'success': True,
+                    'removed': [],
+                    'message': (f"{archive_path.name} comes from the EOD run, so it is kept. "
+                                f"Upload an EOD Output here to use a different one."),
+                })
+            return jsonify({'success': True, 'removed': [],
+                            'message': 'Nothing to remove — no EOD Output was uploaded.'})
+
+        return jsonify({
+            'success': True,
+            'removed': removed,
+            'message': f"Removed {', '.join(removed)}. Upload a new EOD Output to replace it.",
+        })
+    except Exception as e:
+        err = user_error(e, context='hourly-delete-backend')
+        return jsonify({'error': err['user_message'], 'suggestion': err['suggestion']}), 500
+
+
 # ── Cache EOD Output ─────────────────────────────────────────────────────
 
 @hourly_bp.route('/cache-eod-output', methods=['POST'])
@@ -997,9 +1063,11 @@ def process():
             if clients_not_paid_stats:
                 logger.info(
                     f"Clients Not Paid file generated: {cnp_path.name} "
-                    f"({clients_not_paid_stats['notPaidAccounts']:,} clients, "
-                    f"FTOD measured at the "
-                    f"{clients_not_paid_stats['eodReportDate']} EOD)"
+                    f"({clients_not_paid_stats['notPaidAccounts']:,} clients = "
+                    f"FTOD {clients_not_paid_stats['ftodAccounts']:,} at the "
+                    f"{clients_not_paid_stats['eodReportDate']} EOD + demand since "
+                    f"{clients_not_paid_stats['todayUnpaidAccounts']:,} - paid "
+                    f"{clients_not_paid_stats['paidAccounts']:,})"
                 )
         except Exception as cnp_err:
             logger.warning(f"Clients Not Paid generation failed (non-fatal): "
@@ -1055,8 +1123,11 @@ def process():
         if clients_not_paid_stats:
             response.headers['X-Not-Paid-Count'] = str(clients_not_paid_stats['notPaidAccounts'])
             response.headers['X-Ftod-Count'] = str(clients_not_paid_stats['ftodAccounts'])
+            response.headers['X-Today-Demand-Count'] = str(clients_not_paid_stats['todayUnpaidAccounts'])
+            response.headers['X-To-Collect-Count'] = str(clients_not_paid_stats['toCollectAccounts'])
             response.headers['X-Paid-Count'] = str(clients_not_paid_stats['paidAccounts'])
-            exposed += ['X-Not-Paid-Count', 'X-Ftod-Count', 'X-Paid-Count']
+            exposed += ['X-Not-Paid-Count', 'X-Ftod-Count', 'X-Today-Demand-Count',
+                        'X-To-Collect-Count', 'X-Paid-Count']
         response.headers['Access-Control-Expose-Headers'] = ', '.join(exposed)
         t_total = _time.time() - t_process_start
         logger.info(f"Hourly Process Completed in {t_total:.2f} seconds")
@@ -1342,6 +1413,11 @@ def generate_fast_report():
                 collection_rows=int(hourly_coll.notna().sum()),
                 collection_accounts=len(paid_keys),
                 eod_report_date=cnp_eod_date,
+                # 'Collection' here is the HOURLY value (overwritten above), not
+                # the EOD's own, so demand due after the EOD is judged solely on
+                # the hourly file rather than on a column that no longer holds
+                # what the EOD collected.
+                eod_collection_col=None,
             )
         except Exception as cnp_err:
             logger.warning(f"HOURLY FAST REPORT: Clients Not Paid skipped "

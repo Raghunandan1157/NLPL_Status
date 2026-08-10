@@ -422,6 +422,47 @@ def upload_ins():
         return jsonify({"error": str(e)}), 500
 
 
+@od_report_bp.route('/delete-staged', methods=['POST'])
+def delete_staged():
+    """Remove a staged optional input ('od' or 'ins') so it can be re-uploaded.
+
+    Both directories hold exactly one staged file at a time (each upload clears
+    the previous one), so this empties the directory.
+    """
+    payload = request.get_json(silent=True) or {}
+    file_type = payload.get('type') or request.form.get('type')
+    dirs = {'od': BACKUP_DATA_DIR, 'ins': INS_TEMP_DIR}
+    if file_type not in dirs:
+        return jsonify({"error": "Invalid file type"}), 400
+
+    target_dir = dirs[file_type]
+    if not target_dir.exists():
+        return jsonify({"success": True, "removed": [],
+                        "message": "Nothing to remove."})
+
+    removed = []
+    for name in os.listdir(target_dir):
+        if name.startswith("."):
+            continue
+        try:
+            os.remove(target_dir / name)
+            removed.append(name)
+            logger.info(f"[OD_REPORT] Removed staged {file_type} file: {name}")
+        except OSError as e:
+            logger.warning(f"[OD_REPORT] Could not remove {name}: {e}")
+            return jsonify({
+                "error": f"Could not delete {name}: {e}",
+                "suggestion": "Close the file if it is open, then try again.",
+            }), 409
+
+    return jsonify({
+        "success": True,
+        "removed": removed,
+        "message": (f"Removed {', '.join(removed)}. Upload a new file to replace it."
+                    if removed else "Nothing to remove."),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Routes - Main processing (SSE stream)
 # ---------------------------------------------------------------------------

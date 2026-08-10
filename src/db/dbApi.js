@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   clearDb as eodClearDb,
+  deleteBackendFile,
   getBackendFilesStatus,
   getDbStatus,
   ingestSingleToDb,
@@ -43,6 +44,12 @@ export const MASTER_FILES = [
 /** Fast upload — saves the file only, no DuckDB ingestion (deferred to Save to DB). */
 export function uploadMasterFile(backendKey, file) {
   return saveBackendFile(backendKey, file, { ingest: false });
+}
+
+/** Delete a saved master file so a different one can be uploaded. The DuckDB
+ *  table it was loaded into is untouched — clear that from Clear DB. */
+export function removeMasterFile(backendKey) {
+  return deleteBackendFile(backendKey);
 }
 
 /** Ingest a single already-uploaded master file into DuckDB. */

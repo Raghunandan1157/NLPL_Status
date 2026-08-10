@@ -15,6 +15,7 @@ import { analyzeWorkbook, processData } from "./dbProcessing.js";
 import {
   backendData,
   backendStatus,
+  deleteBackend,
   downloadOutputUrl,
   runVba,
   saveBundle,
@@ -62,7 +63,7 @@ export default function DisbProcess({ onProcessed }) {
   );
 
   async function handleBackend(f) {
-    if (!f) return;
+    if (!f) return;   // cleared pick — nothing staged here, the upload is immediate
     setBusy("backend");
     try {
       const res = await uploadBackend(f);
@@ -71,6 +72,21 @@ export default function DisbProcess({ onProcessed }) {
       toast.success(`Backend reference loaded — ${res.rowCount} branches.`, "Reference ready");
     } catch (e) {
       toast.error(e.message, "Upload failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Delete the stored reference so a different mapping file can be uploaded.
+  async function handleRemoveBackend() {
+    setBusy("remove-backend");
+    try {
+      const res = await deleteBackend();
+      setBackend({ exists: false, filename: null, rowCount: 0 });
+      setLookup(null);
+      toast.success(res?.message || "Reference file removed.", "Removed");
+    } catch (e) {
+      toast.error(e.message, "Remove failed");
     } finally {
       setBusy("");
     }
@@ -201,7 +217,14 @@ export default function DisbProcess({ onProcessed }) {
             )}
           </div>
           {backend.exists ? (
-            <FileDrop locked lockedText="Backend reference loaded" hint={`${backend.filename} · ${backend.rowCount} rows`} />
+            <FileDrop
+              locked
+              lockedText="Backend reference loaded"
+              hint={`${backend.filename} · ${backend.rowCount} rows`}
+              onRemove={handleRemoveBackend}
+              removing={busy === "remove-backend"}
+              removeLabel="Remove the stored reference file"
+            />
           ) : (
             <FileDrop
               label="Backend reference (.xlsx/.csv)"
