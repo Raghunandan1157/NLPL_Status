@@ -23,13 +23,22 @@ const jsonPost = (path, payload) =>
 //                 the Daily Collection Report carries account counts only. Sent
 //                 whole, since the sheet is small and read server-side. Omit it
 //                 and the backend uses the EOD run archived for `date`.
+// `channelRowsByDate` — the SAME officer × channel aggregation for every OTHER
+//                 date the channel workbook carries ({date: rows}). The report
+//                 spans several days and receipts for a date keep appearing in
+//                 later exports (late postings), so each sync refreshes all the
+//                 dates it has data for — the whole-date replace on the API side
+//                 makes that self-correcting, never duplicating.
 // Any, all, or none may be supplied. With none, the backend falls back to the
 // latest generated report (and simply skips the channel step).
-export const syncDaily = (date, file, channelRows, amountFile) => {
+export const syncDaily = (date, file, channelRows, amountFile, channelRowsByDate) => {
   if (file || channelRows || amountFile) {
     const fd = new FormData();
     if (file) fd.append("file", file);
     if (channelRows) fd.append("channel_rows", JSON.stringify(channelRows));
+    if (channelRowsByDate && Object.keys(channelRowsByDate).length) {
+      fd.append("channel_rows_extra", JSON.stringify(channelRowsByDate));
+    }
     if (amountFile) fd.append("amount_file", amountFile);
     fd.append("date", date);
     return requestJson("/growwithme/sync-daily", { method: "POST", body: fd });

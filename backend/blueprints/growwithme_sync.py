@@ -14,6 +14,8 @@ DPD buckets + NPA actions:
   POST {GROWWITHME_API_URL}/api/disbursement/sync-daily (Disbursement — per-day)
   POST {GROWWITHME_API_URL}/api/portfolio/sync          (Portfolio POS — monthly)
   POST {GROWWITHME_API_URL}/api/portfolio/sync-accounts (Portfolio Total Account)
+  POST {GROWWITHME_API_URL}/api/clients/sync            (Customer detail — per account)
+  POST {GROWWITHME_API_URL}/api/overview/compute        (Overview board figures, from the snapshots)
 
 This blueprint reuses the shared report parsers (``blueprints.report_parsers``)
 and transforms each flat row into the bucketed shape using the GrowwithmeDB ids:
@@ -145,12 +147,47 @@ def _headers():
     return h
 
 
+# Seconds to wait for a sync chunk. 60 WAS TOO SHORT (2026-08-12: chunks 2, 3, 4,
+# 10, 11, 13 and 15 of 15 timed out, leaving the date partially written).
+#
+# A chunk is not slow because of its size — it is slow because the API inserts
+# ROW BY ROW: one INSERT for the period, one per dpd bucket, one per npa action.
+# 100 rows is therefore ~1000 sequential round-trips to MySQL, and at even 50 ms
+# each that is a minute of work for one chunk.
+#
+# The real fix is the batched INSERT in the API (routes/collection.js and
+# routes/hourly.js, deploy pending) which collapses those ~1000 round-trips into
+# 3. Until that is on the server, waiting longer is what gets the day written.
+_POST_TIMEOUT = int(os.environ.get('GROWWITHME_POST_TIMEOUT') or 300)
+
+
 def _post(path, payload):
     """POST to the growwithme-local API. Returns (ok, result_or_errmsg)."""
     url = f'{GROWWITHME_API_URL}{path}'
     try:
-        resp = _thread_session().post(url, json=payload, headers=_headers(), timeout=60)
+        resp = _thread_session().post(url, json=payload, headers=_headers(), timeout=_POST_TIMEOUT)
     except http_requests.exceptions.RequestException as e:
+        # A body the server refuses mid-upload looks IDENTICAL to a dead server
+        # here: the socket is closed before any response, so requests raises
+        # SSLEOFError / "Max retries exceeded" either way. Calling that "not
+        # reachable" sent people to check whether EC2 was down when the API was
+        # up and answering. Name the likely cause when the body was big.
+        size = len(json.dumps(payload)) if payload is not None else 0
+        if isinstance(e, http_requests.exceptions.ReadTimeout):
+            return False, (
+                f'growwithme-api did not answer within {_POST_TIMEOUT}s. The server is UP '
+                f'and reading the request — it is just slow, because it inserts one row '
+                f'at a time. Deploy api/routes/collection.js and api/routes/hourly.js '
+                f'(batched INSERTs) and restart the API, or raise '
+                f'GROWWITHME_POST_TIMEOUT / lower GROWWITHME_CHUNK_ROWS. '
+                f'NOTE: a timed-out chunk may still have committed on the server.')
+        if size > 100_000 and 'EOF' in str(e):
+            return False, (
+                f'growwithme-api closed the connection on a {size // 1024} KB request. '
+                f'The server is most likely UP — it just refuses bodies this large. '
+                f'Deploy api/index.js (it sets express.json limit 50mb; without it '
+                f'express caps bodies at 100 KB) and restart the API, or lower '
+                f'GROWWITHME_CHUNK_ROWS. Underlying error: {e}')
         return False, f'growwithme-api not reachable: {e}'
     if resp.status_code not in (200, 201, 204):
         return False, f'{path} failed ({resp.status_code}): {(resp.text or "")[:300]}'
@@ -198,11 +235,29 @@ def _explode(rec, period_date=None, period_hour=None):
 
 
 # Rows per HTTP request. A full day's collection push is thousands of rows, each
-# carrying ~25 metrics plus dpd/npa arrays, which serialises well past the proxy's
-# body limit — nginx then answers "413 Request Entity Too Large" before Node sees
-# the request at all. Splitting keeps every request small regardless of how the
-# server is configured, so this works without touching nginx.
-_CHUNK_ROWS = 300
+# carrying ~25 metrics plus dpd/npa arrays, which serialises well past the body
+# limits in front of the route. Splitting keeps every request small regardless of
+# how the server is configured, so this works without touching the server.
+#
+# 300 WAS TOO BIG — that is the 2026-08-12 "SSLEOFError / not reachable" failure.
+# There are TWO limits in the path, and they fail differently:
+#
+#   nginx  client_max_body_size ~1 MB  -> a clean "413 Request Entity Too Large"
+#   express  express.json()   100 KB   -> the socket is closed WHILE the client is
+#                                         still uploading, so requests never sees
+#                                         a response. It raises SSLEOFError, which
+#                                         _post() reports as "not reachable" —
+#                                         even though the server is perfectly up
+#                                         and answers a small request in 0.3 s.
+#
+# 300 rows serialises to just over 100 KB, so it tripped the express limit and
+# every chunk died at "chunk 1/5 failed ... not reachable (0 row(s) written)".
+# Measured against the live API on 2026-08-12: 99 KB is answered, 102 KB is cut off.
+#
+# 100 rows is ~35 KB — comfortably under the limit even on a server still running
+# the old index.js. Once index.js (express.json limit 50mb) is deployed, this can
+# go back up; it is read from the environment so it can be tuned without an edit.
+_CHUNK_ROWS = int(os.environ.get('GROWWITHME_CHUNK_ROWS') or 100)
 
 # Concurrent append requests. The first chunk (the whole-scope replace) is always
 # sent alone before these start, so raising this only widens the append fan-out.
@@ -507,6 +562,76 @@ def _parse_collection_channels(path, date):
         logger.info(f'GrowwithmeDB channel parse: {matched} receipt rows for {date} '
                     f'-> {len(agg)} officer×channel groups (file covers {sorted(seen_dates)}).')
         return [{**v, 'accounts': len(v['accounts'])} for v in agg.values()]
+    finally:
+        wb.close()
+
+
+def _parse_collection_channels_by_date(path, default_date):
+    """Like _parse_collection_channels, but aggregates EVERY Trxdate in the file:
+    {date: [rows]}. Rows with no usable Trxdate land under `default_date` (the
+    file is date-scoped by its name). Raises when `default_date` has no rows —
+    same contract as the single-date parser.
+
+    Exists because the Collection report spans several days and receipts for an
+    earlier date keep appearing in later exports (late postings). Pushing every
+    date the file carries — each a whole-date replace on the API side — keeps the
+    Mode of Collection page complete without anyone re-running old dates by hand.
+    """
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb['Sheet1'] if 'Sheet1' in wb.sheetnames else wb[wb.sheetnames[0]]
+        it = ws.iter_rows(values_only=True)
+        header = [str(c).strip() if c is not None else '' for c in next(it)]
+        idx = {h: i for i, h in enumerate(header)}
+        if 'CollectionChannel' not in idx:
+            raise ValueError('No CollectionChannel column — is this the Collection report?')
+        i_ch = idx['CollectionChannel']
+        i_dt, i_acc = idx.get('Trxdate'), idx.get('AccountID')
+        i_oid, i_onm = idx.get('OfficerID'), idx.get('OfficerName')
+        i_tot, i_rev, i_pid = idx.get('CollectionTotal'), idx.get('ReverseTotal'), idx.get('ProductID')
+
+        def cell(row, i):
+            return row[i] if i is not None and i < len(row) else None
+
+        agg, seen_dates = {}, set()   # (date, oid, channel, pid) -> slot
+        for row in it:
+            if not row or i_ch >= len(row) or row[i_ch] is None:
+                continue
+            d = _excel_date(cell(row, i_dt))
+            if d:
+                seen_dates.add(d)
+            day = d or default_date
+            channel = str(row[i_ch]).strip().upper()
+            if not channel:
+                continue
+            oid = str(cell(row, i_oid) or '').strip()
+            key = (day, oid, channel, str(cell(row, i_pid) or '').strip() or None)
+            slot = agg.get(key)
+            if slot is None:
+                slot = agg[key] = {
+                    'officer_code': oid or None,
+                    'officer_digits': _officer_employee_code(oid, cell(row, i_onm)),
+                    'channel': channel,
+                    'product_id': key[3],
+                    'accounts': set(),
+                    'amount': 0.0,
+                    'reversed': 0.0,
+                }
+            acc = cell(row, i_acc)
+            if acc is not None:
+                slot['accounts'].add(str(acc))
+            slot['amount'] += _num(cell(row, i_tot))
+            slot['reversed'] += _num(cell(row, i_rev))
+
+        out = {}
+        for (day, *_rest), v in agg.items():
+            out.setdefault(day, []).append({**v, 'accounts': len(v['accounts'])})
+        if not out.get(default_date):
+            raise ValueError(
+                f'No rows for {default_date}. The file covers {sorted(seen_dates) or "no recognisable dates"}.')
+        logger.info(f'GrowwithmeDB channel parse: {len(out)} date(s) in file '
+                    f'({sorted(out)}), syncing {default_date} + refreshing the rest.')
+        return out
     finally:
         wb.close()
 
@@ -1322,6 +1447,10 @@ def sync_daily():
     # totals and sent just those (~440 KB of JSON instead of a 5 MB file). Falling
     # back to parsing a raw `channel_file` upload keeps the API usable directly.
     ch_rows = None
+    # Other dates carried by the same channel workbook ({date: rows}). Each is
+    # re-pushed after the main date, so late-posted receipts for earlier days are
+    # picked up automatically (the API push is a whole-date replace — safe).
+    ch_extra = {}
     raw_rows = (request.form.get('channel_rows') or '').strip()
     if raw_rows:
         try:
@@ -1333,6 +1462,19 @@ def sync_daily():
             body['message'] = f"{body.get('message', '')} · Mode of Collection FAILED: bad channel_rows ({e})".strip(' ·')
             return jsonify(body), status
         logger.info(f'GrowwithmeDB channel sync: {len(ch_rows)} pre-aggregated rows for {date}')
+        raw_extra = (request.form.get('channel_rows_extra') or '').strip()
+        if raw_extra:
+            try:
+                parsed = json.loads(raw_extra)
+                if isinstance(parsed, dict):
+                    ch_extra = {
+                        str(d): r for d, r in parsed.items()
+                        if re.match(r'^\d{4}-\d{2}-\d{2}$', str(d)) and str(d) != date
+                        and isinstance(r, list) and r
+                    }
+            except Exception as e:
+                # Best-effort: a bad extras blob must not fail the day's sync.
+                logger.warning(f'GrowwithmeDB channel sync: channel_rows_extra ignored ({e})')
 
     if ch_rows is None:
         try:
@@ -1343,7 +1485,9 @@ def sync_daily():
             return jsonify(body), status
         if ch_path:
             try:
-                ch_rows = _parse_collection_channels(ch_path, date)
+                by_date = _parse_collection_channels_by_date(ch_path, date)
+                ch_rows = by_date.pop(date)
+                ch_extra = by_date
             except Exception as e:
                 logger.warning(f'GrowwithmeDB channel sync: parse failed: {e}')
                 body['channels_ok'] = False
@@ -1372,6 +1516,28 @@ def sync_daily():
             why = res_c.get('message') or res_c
             body['message'] = f"{body.get('message', '')} · Mode of Collection push FAILED: {why}".strip(' ·')
             logger.warning(f'GrowwithmeDB channel sync failed: {why}')
+
+        # ── Refresh the OTHER dates the channel workbook carries ──────────
+        # Only after the main date succeeded (a failing API would fail them all),
+        # and strictly best-effort: a bad extra date is reported, never fatal.
+        if ok_c and ch_extra:
+            refreshed, failed = [], []
+            for d in sorted(ch_extra):
+                res_e, _st_e = _push_batch('/api/collection/sync-channels',
+                                           {'period_date': d, 'rows': ch_extra[d]})
+                if res_e.get('success'):
+                    refreshed.append(f"{d} ({int(res_e.get('inserted') or 0)})")
+                else:
+                    failed.append(d)
+                    logger.warning(f'GrowwithmeDB channel refresh {d} failed: {res_e.get("message")}')
+            if refreshed:
+                body['channel_refreshed_dates'] = refreshed
+                body['message'] = (f"{body.get('message', '')} · Mode of Collection also refreshed: "
+                                   f"{', '.join(refreshed)}").strip(' ·')
+                logger.info(f'GrowwithmeDB channel refresh: {len(refreshed)} extra date(s) pushed')
+            if failed:
+                body['message'] = (f"{body.get('message', '')} · channel refresh FAILED for "
+                                   f"{', '.join(failed)} — re-run this sync to retry").strip(' ·')
 
     return jsonify(body), status
 
@@ -2086,6 +2252,32 @@ def sync_portfolio():
         body['client_detail_as_on'] = as_on
         if ok_c:
             body['message'] = f"{body.get('message', '')} · {msg_c}".strip(' ·')
+            # ── Overview board figures (FTOD - PAR Addition / Total 1+ PAR /
+            #    Disbursement) ────────────────────────────────────────────────
+            # The snapshot just pushed is the same account-level DPD data the
+            # offline build_overview_metrics.py reads from the raw workbooks, so
+            # the API can now derive the Overview's PAR-derived rows itself,
+            # against the PRIOR month's snapshot as the 0-DPD baseline. This is
+            # what makes the Overview's "FTOD - PAR Addition" cell fill in from
+            # this one button instead of a separate script + curl run. Best-
+            # effort: a failure here never fails an otherwise-good portfolio sync.
+            ok_o, res_o = _post('/api/overview/compute', {'period_month': period_month})
+            if ok_o and (res_o or {}).get('ok'):
+                body['overview_ok'] = True
+                ftod = res_o.get('ftodParAddition')
+                ftod_txt = f"FTOD - PAR Addition {ftod} Cr" if ftod is not None else \
+                    "FTOD skipped (no prior-month snapshot as baseline)"
+                body['message'] = (f"{body.get('message', '')} · Overview updated: {ftod_txt}, "
+                                   f"Total 1+ PAR {res_o.get('total1PlusPar')} Cr").strip(' ·')
+                logger.info(f"GrowwithmeDB overview compute: {res_o.get('message')}")
+            else:
+                body['overview_ok'] = False
+                detail = (res_o or {}).get('message') or (res_o if isinstance(res_o, str) else res_o)
+                body['message'] = (f"{body.get('message', '')} · Overview board figures NOT updated: "
+                                   f"{detail} (an older API build without /api/overview/compute "
+                                   f"answers 404 — deploy api/routes/overview.js, api/lib/overview.js "
+                                   f"and api/index.js, then re-run this sync)").strip(' ·')
+                logger.warning(f'GrowwithmeDB overview compute failed: {detail}')
         else:
             body['message'] = f"{body.get('message', '')} · Customer details FAILED: {msg_c}".strip(' ·')
             logger.warning(f'GrowwithmeDB client detail: {msg_c}')

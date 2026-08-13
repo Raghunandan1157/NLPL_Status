@@ -84,17 +84,27 @@ async function aggregateChannelFile(file, date) {
     throw new Error('No "CollectionChannel" column — is this the Collection report?');
   }
 
+  // Aggregated per DATE, not just for the selected one. The report spans several
+  // days, and receipts for an earlier date keep appearing in later exports (late
+  // postings) — so every date this file carries is worth (re)pushing. The server
+  // push is a whole-date replace, which makes that self-correcting.
   const seen = new Set();
-  const agg = new Map();
+  const byDate = new Map(); // 'YYYY-MM-DD' -> Map(key -> slot)
   let matched = 0;
   for (const r of rows) {
     const iso = excelToIso(r.Trxdate);
     if (iso) seen.add(iso);
-    // Rows with no usable date are kept: the file is already date-scoped by name.
-    if (iso && iso !== date) continue;
+    // Rows with no usable date belong to the SELECTED date: the file is already
+    // date-scoped by its name.
+    const day = iso || date;
     const channel = String(r.CollectionChannel ?? "").trim().toUpperCase();
     if (!channel) continue;
-    matched++;
+    if (day === date) matched++;
+    let agg = byDate.get(day);
+    if (!agg) {
+      agg = new Map();
+      byDate.set(day, agg);
+    }
     const officerCode = String(r.OfficerID ?? "").trim();
     const productId = r.ProductID == null ? null : String(r.ProductID).trim() || null;
     const key = `${officerCode}|${channel}|${productId}`;
@@ -115,18 +125,22 @@ async function aggregateChannelFile(file, date) {
     slot.amount += Number(r.CollectionTotal) || 0;
     slot.reversed += Number(r.ReverseTotal) || 0;
   }
-  if (!agg.size) {
+  if (!byDate.get(date)?.size) {
     const span = [...seen].sort().join(", ") || "no recognisable dates";
     throw new Error(`No rows dated ${date}. This file covers: ${span}.`);
   }
 
-  const out = [...agg.values()].map(({ _accounts, amount, reversed, ...rest }) => ({
+  const finish = (agg) => [...agg.values()].map(({ _accounts, amount, reversed, ...rest }) => ({
     ...rest,
     accounts: _accounts.size,
     amount: Math.round(amount * 100) / 100,
     reversed: Math.round(reversed * 100) / 100,
   }));
-  return { rows: out, matched, total: rows.length, dates: [...seen].sort() };
+  const out = finish(byDate.get(date));
+  byDate.delete(date);
+  const extras = {};
+  for (const [d, agg] of byDate) extras[d] = finish(agg);
+  return { rows: out, extras, matched, total: rows.length, dates: [...seen].sort() };
 }
 
 function todayIso() {
@@ -245,12 +259,15 @@ function DailyTab() {
       // A 5 MB / 34-column / 30k-row file becomes ~440 KB of JSON, so the upload
       // cannot hit a proxy body limit.
       let channelRows = null;
+      let channelExtras = null;
       if (channelFile) {
         try {
           const t = await aggregateChannelFile(channelFile, date);
           channelRows = t.rows;
+          channelExtras = t.extras;
+          const extraDays = Object.keys(t.extras).length;
           const kb = (JSON.stringify(t.rows).length / 1024).toFixed(0);
-          setTrimNote(`Mode of Collection: ${t.matched.toLocaleString()} of ${t.total.toLocaleString()} rows used for ${date}, sent as ${t.rows.length.toLocaleString()} officer×channel totals (${kb} KB).`);
+          setTrimNote(`Mode of Collection: ${t.matched.toLocaleString()} of ${t.total.toLocaleString()} rows used for ${date}, sent as ${t.rows.length.toLocaleString()} officer×channel totals (${kb} KB)${extraDays ? ` · ${extraDays} other date(s) in the file will be refreshed too` : ""}.`);
         } catch (e) {
           setTrimNote("");
           toast.error(e.message, "Mode of Collection file");
@@ -258,7 +275,7 @@ function DailyTab() {
           return;
         }
       }
-      const r = await syncDaily(date, file, channelRows, amountFile);
+      const r = await syncDaily(date, file, channelRows, amountFile, channelExtras);
       // The channel push is reported separately so a channel problem is visible
       // even when the collection sync itself succeeded.
       if (r.success && r.channels_ok === false) {
@@ -306,7 +323,7 @@ function DailyTab() {
         />
         <FileDrop
           label="2 · Mode of Collection (optional)"
-          hint='e.g. "Collection report as on 04-08-2026.xlsx" — only its CollectionChannel column is read. May span several days; only the selected date is used.'
+          hint='e.g. "Collection report as on 04-08-2026.xlsx" — only its CollectionChannel column is read. May span several days; EVERY date it carries is pushed (selected date + a refresh of the rest, so late-posted receipts are picked up).'
           accept=".xlsx,.xls"
           file={channelFile}
           // Clearing (or replacing) the file must drop the row-count note too —
