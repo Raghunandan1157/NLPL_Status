@@ -276,10 +276,9 @@ def _parse_quick_report(path):
         # Prefer the authoritative per-employee 'Employee Data' sheet (newer Hourly
         # Report — clean grouped columns, one row per officer). The legacy Quick
         # Report has no such sheet and falls through to the OverAll officer section.
-        # (The Hourly Report's OverAll officer section is a partial/region breakdown
-        # with different totals, so it must NOT be used when Employee Data exists.)
-        if 'Employee Data' in wb.sheetnames:
-            return _parse_employee_data_sheet(wb['Employee Data'])
+        # However, for the Hourly Report, the 'Employee Data' sheet lacks hourly
+        # collection numbers, while the 'OverAll' sheet has them. We will first
+        # try to parse the 'OverAll' sheet's officer section.
         if 'OverAll' not in wb.sheetnames:
             raise ValueError("Unsupported hourly file: no 'Employee Data' or 'OverAll' sheet.")
         over_rows = list(wb['OverAll'].iter_rows(values_only=True))
