@@ -14,6 +14,7 @@ DPD buckets + NPA actions:
   POST {GROWWITHME_API_URL}/api/disbursement/sync-daily (Disbursement — per-day)
   POST {GROWWITHME_API_URL}/api/portfolio/sync          (Portfolio POS — monthly)
   POST {GROWWITHME_API_URL}/api/portfolio/sync-accounts (Portfolio Total Account)
+  POST {GROWWITHME_API_URL}/api/portfolio/sync-officers (Portfolio — FO/officer grain)
   POST {GROWWITHME_API_URL}/api/clients/sync            (Customer detail — per account)
   POST {GROWWITHME_API_URL}/api/overview/compute        (Overview board figures, from the snapshots)
 
@@ -2068,6 +2069,11 @@ def _parse_par_pos(path):
 
     Streams the sheet row-by-row with openpyxl read_only — a raw PAR can be 100 MB+
     with 700k rows, so we never load it into a DataFrame.
+
+    Returns (branch_rows, officer_rows): the SAME streaming pass also rolls the
+    grain one level deeper, per (BranchName, product, OfficerID), for the
+    FO-level portfolio push (POST /api/portfolio/sync-officers). Same bucket and
+    product per row, so the officer rows sum exactly to the branch rows.
     """
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
@@ -2093,9 +2099,13 @@ def _parse_par_pos(path):
         i_branch, i_dpd, i_pos = idx['BranchName'], idx[dpd_col], idx['PrincipalOS']
         i_prod = idx.get('Product Name')
         i_pid = idx.get('ProductID')
+        i_oid = idx.get('OfficerID')
+        i_onm = idx.get('OfficerName')
 
         # (branch, product_type_id) -> {bucket: pos_sum, ..., '_acc': count}
         agg = {}
+        # (branch, product_type_id, officer_code) -> officer-grain slot
+        agg_off = {}
         # Dropped-row tallies. Silently skipping rows is how a month ends up with a
         # zero NPA figure and nobody notices, so they're logged after the sweep.
         skip_blank_dpd = skip_product = 0
@@ -2125,6 +2135,20 @@ def _parse_par_pos(path):
                 }
             slot['pos'][bucket] += pos_val
             slot['acc'][bucket] += 1
+            # Officer grain — same row, same bucket/product, finer key.
+            if i_oid is not None:
+                oc = str(row[i_oid]).strip() if (i_oid < len(row) and row[i_oid] is not None) else ''
+                okey = (branch, pt, oc)
+                oslot = agg_off.get(okey)
+                if oslot is None:
+                    onm = str(row[i_onm]).strip() if (i_onm is not None and i_onm < len(row) and row[i_onm] is not None) else ''
+                    oslot = agg_off[okey] = {
+                        'pos': {'regular': 0.0, 'sma0': 0.0, 'sma1': 0.0, 'pnpa': 0.0, 'npa': 0.0},
+                        'acc': {'regular': 0, 'sma0': 0, 'sma1': 0, 'pnpa': 0, 'npa': 0},
+                        'name': onm,
+                    }
+                oslot['pos'][bucket] += pos_val
+                oslot['acc'][bucket] += 1
 
         if skip_blank_dpd or skip_product:
             logger.info(f'GrowwithmeDB portfolio sync: skipped {skip_blank_dpd} row(s) with a blank DPD band '
@@ -2141,7 +2165,19 @@ def _parse_par_pos(path):
                 'acc': int(sum(acc_buckets.values())),
                 'acc_buckets': acc_buckets,
             })
-        return out
+        officers = []
+        for (branch, pt, oc), oslot in agg_off.items():
+            pos = oslot['pos']
+            pos['total'] = pos['regular'] + pos['sma0'] + pos['sma1'] + pos['pnpa'] + pos['npa']
+            acc_buckets = oslot['acc']
+            officers.append({
+                'branch': branch, 'product_type_id': int(pt),
+                'officer_code': oc, 'officer_name': oslot['name'],
+                'pos': {k: round(v, 2) for k, v in pos.items()},
+                'acc': int(sum(acc_buckets.values())),
+                'acc_buckets': acc_buckets,
+            })
+        return out, officers
     finally:
         wb.close()
 
@@ -2177,7 +2213,9 @@ def sync_portfolio():
                         'message': 'No Month-End Employee Report found. Generate one first, or upload one.'}), 404
     try:
         if _has_pos_sheet(path):
-            # Generated Month-End report — read its POS sheet.
+            # Generated Month-End report — read its POS sheet. POS totals only:
+            # no per-account rows, so no officer grain to push from this source.
+            officer_rows = []
             rows = _parse_pos_sheet(path)
             # Derive Total Account from the demand-bucket counts (matches the live site).
             # Best-effort — a derivation failure just falls back to a POS-sheet column.
@@ -2189,8 +2227,9 @@ def sync_portfolio():
         else:
             # Raw PAR upload — build the POS (PrincipalOS × DPD) directly. Account
             # counts come from the PAR itself (per branch×product), so no acc_map.
+            # The same pass also yields the officer-grain rows for the FO-level push.
             logger.info('GrowwithmeDB portfolio sync: no POS sheet — treating upload as a raw PAR.')
-            rows = _parse_par_pos(path)
+            rows, officer_rows = _parse_par_pos(path)
             acc_map = {}
         is_raw_par = not _has_pos_sheet(path)
     except Exception as e:
@@ -2240,6 +2279,28 @@ def sync_portfolio():
             body['accounts_ok'] = False
             body['message'] = f"{body.get('message', '')} · Total Account push FAILED: {res_a}".strip()
             logger.warning(f'GrowwithmeDB portfolio accounts sync failed: {res_a}')
+
+    # ── FO-level portfolio (officer grain) ────────────────────────────────
+    # Same rows, one GROUP BY finer (branch × product × officer), aggregated in
+    # the same _parse_par_pos pass. Feeds the Portfolio drill's Officer level
+    # AND the self-tier (FO) portfolio view. Whole-month override on the API's
+    # officer tables only; best-effort — a failure never fails the POS sync.
+    if is_raw_par and officer_rows:
+        res_of, _st_of = _push_batch('/api/portfolio/sync-officers',
+                                     {'period_month': period_month, 'rows': officer_rows})
+        if res_of.get('success'):
+            body['officers_ok'] = True
+            body['officer_rows'] = int(res_of.get('inserted') or 0)
+            body['message'] = (f"{body.get('message', '')} · FO portfolio: "
+                               f"{res_of.get('inserted', 0)} officer rows").strip(' ·')
+            logger.info(f"GrowwithmeDB officer sync: {res_of.get('inserted')} rows for {period_month}")
+        else:
+            body['officers_ok'] = False
+            body['message'] = (f"{body.get('message', '')} · FO portfolio push FAILED: "
+                               f"{res_of.get('message')} (an older API build without "
+                               f"/api/portfolio/sync-officers answers 404 — deploy "
+                               f"routes/portfolio.js and index.js, then re-run this sync)").strip(' ·')
+            logger.warning(f'GrowwithmeDB officer sync failed: {res_of.get("message")}')
 
     # ── Client detail (loan-account grain) ────────────────────────────────
     # Only a RAW PAR carries per-account rows; a generated Month-End report has
