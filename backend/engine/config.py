@@ -37,7 +37,13 @@ THREADS = _HP_WSGI_THREADS
 
 # Upload limits
 MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500 MB (month-end needs 4 large files)
-MAX_FORM_MEMORY_SIZE = 1 * 1024 * 1024   # 1 MB (files > 1MB stream to disk)
+# Non-file multipart FIELDS held in memory (files still stream to disk above
+# 1 MB regardless — that's Werkzeug's spooling, not this). The GrowwithmeDB
+# daily sync sends the browser-aggregated Mode-of-Collection rows as TEXT
+# fields (channel_rows / channel_rows_extra, ~0.5 MB per date the workbook
+# spans), so a multi-date channel workbook overflows a 1 MB cap and Werkzeug
+# rejects the whole request as a bare 413 before any route runs.
+MAX_FORM_MEMORY_SIZE = 64 * 1024 * 1024  # 64 MB
 
 # Data directories - base can be overridden via COLLECTION_DATA_DIR
 DATA_DIR = Path(os.environ.get('COLLECTION_DATA_DIR', str(BASE_DIR / 'data')))
