@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CalendarDays, CloudUpload, Database, PieChart, Plug, RefreshCw, UserCog, Users, Workflow } from "lucide-react";
 import { Button, FileDrop, useToast } from "../components/ui.jsx";
-import { fetchEmployee, ping, saveEmployee, scopeOptions, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
+import { autosyncStatus, fetchEmployee, ping, saveEmployee, scopeOptions, syncDaily, syncDisbursement, syncHourly, syncPortfolio, syncStaff } from "./growwithmeApi.js";
 import "../eod/eod.css";
 
 const TABS = [
@@ -795,6 +795,44 @@ function EmployeeTab() {
   );
 }
 
+// Read-only banner: outcome of the automatic pushes the backend fires after
+// every EOD / Hourly report generation. Polls while the page is open so a sync
+// that finishes in the background updates without a reload.
+function AutoSyncStatus() {
+  const [st, setSt] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => autosyncStatus().then((r) => { if (alive) setSt(r); }).catch(() => {});
+    load();
+    const id = setInterval(load, 15000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  const entries = ["daily", "hourly"].map((k) => [k, st?.[k]]).filter(([, v]) => v);
+  if (!entries.length) return null;
+  return (
+    <div className="banner" style={{ marginBottom: 16 }}>
+      <RefreshCw size={15} />
+      <div>
+        <b>Auto-sync</b> (runs by itself after every EOD / Hourly generation):{" "}
+        {entries.map(([k, v]) => (
+          <span key={k} style={{ marginRight: 14 }} title={v.message || ""}>
+            {k === "daily" ? "Daily" : "Hourly"} {v.date}
+            {v.period_hour != null ? ` @${v.period_hour}h` : ""} —{" "}
+            {v.state === "running" ? (
+              <b>running…</b>
+            ) : v.success ? (
+              <b style={{ color: "var(--ok, #059669)" }}>synced</b>
+            ) : (
+              <b style={{ color: "var(--danger, #dc2626)" }}>FAILED</b>
+            )}
+            {v.finished ? ` at ${String(v.finished).slice(11, 16)}` : ""}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function GrowwithmeModule() {
   const toast = useToast();
   const [tab, setTab] = useState("daily");
@@ -843,6 +881,8 @@ export default function GrowwithmeModule() {
         <Database size={15} /> Targets the GrowwithmeDB API at <b>GROWWITHME_API_URL</b>. Each sync replaces the
         pushed scope (whole-scope delete-then-insert).
       </div>
+
+      <AutoSyncStatus />
 
       {tab === "daily" && <DailyTab />}
       {tab === "hourly" && <HourlyTab />}

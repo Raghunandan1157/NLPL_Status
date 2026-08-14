@@ -67,6 +67,8 @@ export async function processHourly({ files, options }) {
   if (files.hourlyDaily) fd.append("hourlyDaily", files.hourlyDaily);
 
   if (options.useGDriveCollection) fd.append("useGDriveCollection", "true");
+  // Post-generation GrowwithmeDB push; the backend defaults to true when absent.
+  fd.append("autoSync", String(options.autoSync ?? true));
   if (options.processId) fd.append("processId", options.processId);
 
   let response;

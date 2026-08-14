@@ -60,6 +60,13 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
   const job = useProcessingJob({ module: "eod", steps: EOD_STEPS, onSseEvent: eodSseStep });
   const [files, setFiles] = useState({ par: null, collection: null });
   const [useCache, setUseCache] = useState(false);
+  // Auto-push this run to GrowwithmeDB (MIS site) when generation finishes.
+  // Remembered across sessions; ON by default.
+  const [autoSync, setAutoSyncState] = useState(() => localStorage.getItem("eod_gwm_autosync") !== "0");
+  const setAutoSync = (v) => {
+    setAutoSyncState(v);
+    localStorage.setItem("eod_gwm_autosync", v ? "1" : "0");
+  };
   const [busy, setBusy] = useState("");
 
   const isMasterDemandMissing = !status?.backend?.masterDemand;
@@ -127,6 +134,7 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
           cacheCollection: true,
           autoFixSheets: false,
           allowStalePar,
+          autoSync,
           processId,
           signal,
         };
@@ -286,6 +294,30 @@ export default function UploadProcessPanel({ status, refreshStatus, onSwitchTab 
               onChange={(v) => setUseCache(v)}
               label="Use cached PAR + Collection data"
             />
+          </div>
+
+          {/* Auto-sync opt-in — clearly visible right above the Run button. */}
+          <div
+            className="banner"
+            style={{
+              marginBottom: 16,
+              border: `1.5px solid ${autoSync ? "var(--ok, #059669)" : "var(--border, #e2e8f0)"}`,
+              background: autoSync ? "rgba(5,150,105,.06)" : undefined,
+            }}
+          >
+            <CloudUpload size={15} style={{ color: autoSync ? "var(--ok, #059669)" : undefined }} />
+            <div style={{ flex: 1 }}>
+              <Switch
+                checked={autoSync}
+                onChange={setAutoSync}
+                label={
+                  <span>
+                    <b>Auto-sync to GrowwithmeDB (MIS site) after generating</b> — pushes the generated
+                    report, rupee amounts and Mode of Collection by itself. Untick to only generate.
+                  </span>
+                }
+              />
+            </div>
           </div>
 
           {(masterMissing || needsSync) && (

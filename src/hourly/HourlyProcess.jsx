@@ -12,7 +12,7 @@ import {
   Play,
   Zap,
 } from "lucide-react";
-import { Button, FileDrop, RemoveButton, useToast, Modal } from "../components/ui.jsx";
+import { Button, FileDrop, RemoveButton, Switch, useToast, Modal } from "../components/ui.jsx";
 import { syncHourly } from "../growwithme/growwithmeApi.js";
 import {
   saveBackendFile,
@@ -86,6 +86,13 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
 
   const [busy, setBusy] = useState("");
   const [report, setReport] = useState(null); // { filename, clientsNotPaid }
+  // Auto-push the generated hourly snapshot to GrowwithmeDB (MIS site).
+  // Remembered across sessions; ON by default.
+  const [autoSync, setAutoSyncState] = useState(() => localStorage.getItem("hourly_gwm_autosync") !== "0");
+  const setAutoSync = (v) => {
+    setAutoSyncState(v);
+    localStorage.setItem("hourly_gwm_autosync", v ? "1" : "0");
+  };
 
   const targetDateDMY = useMemo(() => {
     if (!targetDate) return "";
@@ -248,6 +255,7 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
           minute: timeState.minute,
           ampm: timeState.ampm,
           useGDriveCollection,
+          autoSync,
           processId,
           signal,
         };
@@ -489,6 +497,30 @@ export default function HourlyProcess({ status, refreshStatus, goToReports }) {
                   <span className="ampm-desc">{p === "AM" ? "Morning" : "Afternoon"}</span>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Auto-sync opt-in — clearly visible right above the Run button. */}
+          <div
+            className="banner"
+            style={{
+              marginTop: 16,
+              border: `1.5px solid ${autoSync ? "var(--ok, #059669)" : "var(--border, #e2e8f0)"}`,
+              background: autoSync ? "rgba(5,150,105,.06)" : undefined,
+            }}
+          >
+            <Database size={15} style={{ color: autoSync ? "var(--ok, #059669)" : undefined }} />
+            <div style={{ flex: 1 }}>
+              <Switch
+                checked={autoSync}
+                onChange={setAutoSync}
+                label={
+                  <span>
+                    <b>Auto-sync to GrowwithmeDB (MIS site) after generating</b> — pushes this hourly
+                    snapshot by itself. Untick to only generate.
+                  </span>
+                }
+              />
             </div>
           </div>
 

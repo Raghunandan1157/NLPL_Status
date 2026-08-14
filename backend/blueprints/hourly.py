@@ -1103,6 +1103,19 @@ def process():
                 'suggestion': 'Ensure the EOD Output has the required Region/Division/officer and demand columns, then retry.',
             }), 500
 
+        # Auto-push the just-generated Hourly Fast Report to GrowwithmeDB in the
+        # background (grain 1, hour taken from the report's selected time).
+        # Governed by the "Auto-sync" switch on the upload screen (absent = on).
+        # Best-effort — never blocks or fails the generation/download.
+        try:
+            if request.form.get('autoSync', 'true').strip().lower() == 'false':
+                logger.info("GrowwithmeDB auto-sync skipped (switch off).")
+            else:
+                from blueprints.growwithme_sync import start_auto_sync_hourly
+                start_auto_sync_hourly(selected_date, selected_time)
+        except Exception as _gs_err:
+            logger.warning(f"GrowwithmeDB auto-sync not started: {_gs_err}")
+
         # Filename rule: "Hourly Report as on {date} {time}.xlsx" with ':' -> '-'
         # and any invalid filename characters stripped.
         safe_time = selected_time.replace(':', '-')

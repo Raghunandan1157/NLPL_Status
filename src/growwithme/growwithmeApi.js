@@ -6,6 +6,10 @@ import { requestJson } from "../lib/apiClient.js";
 
 export const ping = () => requestJson("/growwithme/ping");
 
+// Last automatic post-generation sync outcome per kind ({daily:{...}, hourly:{...}}).
+// The backend fires these itself after every EOD / Hourly report generation.
+export const autosyncStatus = () => requestJson("/growwithme/autosync-status");
+
 // Each sync takes the latest generated report by default, OR an optional `file`
 // the user uploads (their own report). With a file we send multipart; without
 // one, JSON — the backend then falls back to the latest generated report.

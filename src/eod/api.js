@@ -75,6 +75,8 @@ export function processEod({ files, options }) {
   fd.append("cachePar", String(options.cachePar));
   fd.append("cacheCollection", String(options.cacheCollection));
   fd.append("autoFixSheets", String(options.autoFixSheets));
+  // Post-generation GrowwithmeDB push; the backend defaults to true when absent.
+  fd.append("autoSync", String(options.autoSync ?? true));
   // Bypass the daily-PAR sanity check (same file as Last Month PAR / dated
   // before the report month). Only set after the user confirms the override.
   if (options.allowStalePar) fd.append("allowStalePar", "true");

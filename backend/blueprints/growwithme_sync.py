@@ -2711,3 +2711,152 @@ def sync_disbursement():
             tmp.unlink()
         except Exception:
             pass
+
+
+# ── Auto-sync after report generation ─────────────────────────────────────
+# Generating a report already leaves every artifact the daily/hourly syncs need
+# on disk: Employee_Report_Latest.xlsx (the generated report), the archived EOD
+# run / EOD_Output_Latest.xlsx (Regular Demand vs Collection — the rupee
+# amounts), the raw Collection workbook cached as daily_collection_last.xlsx
+# (Mode of Collection, every date it carries), and Hourly_Fast_Report_Latest.xlsx.
+#
+# These helpers push them to GrowwithmeDB automatically by POSTing to THIS
+# backend's own /growwithme/sync-* routes on localhost — the exact code path
+# the manual Sync page uses, so auto and manual behave identically (chunked
+# pushes, amount matching, employee onboarding, multi-date channel refresh).
+#
+# Fire-and-forget: generation must never block or fail on a sync problem, so
+# each push runs on a daemon thread and records its outcome in
+# growwithme_autosync.json (served by GET /growwithme/autosync-status).
+# Disable with GROWWITHME_AUTO_SYNC=0.
+
+_AUTOSYNC_STATUS_PATH = config.BACKEND_DATA_DIR / 'growwithme_autosync.json'
+_AUTOSYNC_LOCK = threading.Lock()
+# A full daily push is ~15 chunks plus channel refreshes for a dozen dates.
+_AUTOSYNC_TIMEOUT = int(os.environ.get('GROWWITHME_AUTOSYNC_TIMEOUT') or 1800)
+
+
+def _autosync_enabled():
+    return (os.environ.get('GROWWITHME_AUTO_SYNC') or '1').strip().lower() not in (
+        '0', 'false', 'no', 'off')
+
+
+def _autosync_record(kind, entry):
+    """Merge one sync-kind's status into the shared JSON status file."""
+    with _AUTOSYNC_LOCK:
+        try:
+            data = json.loads(_AUTOSYNC_STATUS_PATH.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        data[kind] = entry
+        try:
+            _AUTOSYNC_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _AUTOSYNC_STATUS_PATH.write_text(json.dumps(data, indent=1), encoding='utf-8')
+        except Exception as e:
+            logger.warning(f'GrowwithmeDB auto-sync: could not write status file: {e}')
+
+
+def _autosync_post(kind, path, data, file_field=None, file_path=None):
+    """POST to this backend's own sync route and record the outcome."""
+    started = datetime.now().isoformat(timespec='seconds')
+    _autosync_record(kind, {'state': 'running', 'started': started, **data})
+    host = config.HOST if config.HOST not in ('0.0.0.0', '::') else '127.0.0.1'
+    base = f'http://{host}:{config.PORT}'
+    try:
+        fh = None
+        try:
+            files = None
+            if file_field and file_path and file_path.exists():
+                fh = open(file_path, 'rb')
+                files = {file_field: (file_path.name, fh)}
+            resp = http_requests.post(f'{base}{path}', data=data, files=files,
+                                      timeout=_AUTOSYNC_TIMEOUT)
+        finally:
+            if fh:
+                fh.close()
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        ok = bool(body.get('success')) and resp.status_code < 400
+        entry = {
+            'state': 'done', 'success': ok, 'started': started,
+            'finished': datetime.now().isoformat(timespec='seconds'),
+            'message': body.get('message') or f'HTTP {resp.status_code}',
+            **data,
+        }
+        _autosync_record(kind, entry)
+        (logger.info if ok else logger.warning)(
+            f"GrowwithmeDB auto-sync ({kind}): {'OK' if ok else 'FAILED'} — {entry['message']}")
+    except Exception as e:
+        _autosync_record(kind, {
+            'state': 'done', 'success': False, 'started': started,
+            'finished': datetime.now().isoformat(timespec='seconds'),
+            'message': f'auto-sync error: {e}', **data,
+        })
+        logger.warning(f'GrowwithmeDB auto-sync ({kind}) failed: {e}')
+
+
+def start_auto_sync_daily():
+    """After an EOD run: push the generated report, its rupee amounts and the
+    raw Collection workbook's Mode of Collection (every date it carries) to
+    GrowwithmeDB. Returns True when the background sync was started."""
+    if not _autosync_enabled():
+        return False
+    td_file = config.BACKEND_DATA_DIR / '.target_date'
+    try:
+        date = datetime.strptime(td_file.read_text().strip(), '%d-%m-%Y').strftime('%Y-%m-%d')
+    except Exception as e:
+        logger.warning(f'GrowwithmeDB auto-sync (daily) skipped: no report date ({e})')
+        return False
+    # The raw Collection workbook the run was generated from (Last Cache copy).
+    channel = config.DB_CACHE_DIR / 'daily_collection_last.xlsx'
+    threading.Thread(
+        target=_autosync_post,
+        args=('daily', '/growwithme/sync-daily', {'date': date}),
+        kwargs={'file_field': 'channel_file',
+                'file_path': channel if channel.exists() else None},
+        daemon=True, name='gwm-autosync-daily',
+    ).start()
+    logger.info(f'GrowwithmeDB auto-sync (daily) started for {date} '
+                f'(channel workbook: {"yes" if channel.exists() else "no"})')
+    return True
+
+
+def start_auto_sync_hourly(selected_date=None, selected_time=None):
+    """After an Hourly run: push the just-generated Hourly Fast Report to
+    GrowwithmeDB. `selected_date` is dd-mm-yyyy; `selected_time` is the report
+    time, '2:30 PM' or '14:30'. Returns True when the sync was started."""
+    if not _autosync_enabled():
+        return False
+    try:
+        date = datetime.strptime(str(selected_date).strip(), '%d-%m-%Y').strftime('%Y-%m-%d')
+    except Exception:
+        date = datetime.now().strftime('%Y-%m-%d')
+    hour = None
+    m = re.match(r'^(\d{1,2})(?::\d{2})?\s*(AM|PM)?$', str(selected_time or '').strip().upper())
+    if m:
+        hour = (int(m.group(1)) % 12) if m.group(2) else int(m.group(1))
+        if m.group(2) == 'PM':
+            hour += 12
+    if hour is None or not (0 <= hour <= 23):
+        hour = datetime.now().hour
+    threading.Thread(
+        target=_autosync_post,
+        args=('hourly', '/growwithme/sync-hourly', {'date': date, 'period_hour': str(hour)}),
+        daemon=True, name='gwm-autosync-hourly',
+    ).start()
+    logger.info(f'GrowwithmeDB auto-sync (hourly) started for {date} h{hour}')
+    return True
+
+
+@growwithme_bp.route('/autosync-status', methods=['GET'])
+def autosync_status():
+    """Last auto-sync outcome per kind: {'daily': {...}, 'hourly': {...}}."""
+    try:
+        data = json.loads(_AUTOSYNC_STATUS_PATH.read_text(encoding='utf-8'))
+        return jsonify(data if isinstance(data, dict) else {})
+    except Exception:
+        return jsonify({})

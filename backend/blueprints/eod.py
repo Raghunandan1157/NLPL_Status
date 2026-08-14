@@ -1228,6 +1228,23 @@ def process_files_endpoint():
             if run_warnings:
                 result['warnings'] = run_warnings
 
+            # Auto-push this run to GrowwithmeDB in the background: the generated
+            # report + rupee amounts (Demand vs Collection) + Mode of Collection
+            # from the raw Collection workbook. Governed by the "Auto-sync" switch
+            # on the upload screen (absent = on, so API callers keep the default).
+            # Best-effort — a sync problem never fails the generation; outcome
+            # lands in /growwithme/autosync-status.
+            try:
+                if request.form.get('autoSync', 'true').strip().lower() == 'false':
+                    logging.info("GrowwithmeDB auto-sync skipped (switch off).")
+                    result['growwithme_autosync'] = 'off'
+                else:
+                    from blueprints.growwithme_sync import start_auto_sync_daily
+                    if start_auto_sync_daily():
+                        result['growwithme_autosync'] = 'started'
+            except Exception as _gs_err:
+                logging.warning(f"GrowwithmeDB auto-sync not started: {_gs_err}")
+
             return jsonify(result)
 
     except process_jobs.JobCancelled:
